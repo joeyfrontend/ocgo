@@ -5,3 +5,8 @@ dist/
 .env
 .tmp/
 oc-go-cc
+
+# Proxy traces and captured traffic: they can contain target data.
+traces/
+*.jsonl
+config.json
