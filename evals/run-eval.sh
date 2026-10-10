@@ -115,8 +115,8 @@ print(json.dumps({"count": len(entries),
                   "cost": sum(e.get("cost", 0) for e in entries),
                   "tokens": sum(e.get("input", 0) + e.get("output", 0) for e in entries)}))
 PY
-    bash "$ROOT/scripts/hunt7-run.sh" "$OUT/scope.json" "$OUT" "$TARGET_PROMPT" \
-      >"$OUT/hunt7run.log" 2>&1
+    bash "$ROOT/scripts/scoped-run.sh" "$OUT/scope.json" "$OUT" "$TARGET_PROMPT" \
+      >"$OUT/scoped-run.log" 2>&1
     HARNESS_RC=$?
     python3 - "$LEDGER" >"$OUT/ledger-after.json" <<'PY'
 import json, sys

@@ -1,8 +1,0 @@
-2026/10/10 13:12:25 scope: programme "idor-app", 1 host entries: 127.0.0.1
-2026/10/10 13:12:25 local exemptions (not programme scope): 127.0.0.1:3456
-2026/10/10 13:12:25 ocgo-guard listening on http://127.0.0.1:8888 (set HTTP_PROXY and HTTPS_PROXY)
-DENY github.com:443 CONNECT not listed in scope
-DENY chatgpt.com:443 CONNECT not listed in scope
-DENY api.github.com:443 CONNECT not listed in scope
-DENY chatgpt.com:443 CONNECT not listed in scope
-DENY ab.chatgpt.com:443 CONNECT not listed in scope

@@ -3,7 +3,7 @@
 //
 // It is an HTTP forward proxy that will only dial hosts named in a scope file.
 // A run configured to reach the network through it cannot touch anything else,
-// and every decision — allowed or refused — is logged with the host and the
+// and every decision, allowed or refused, is logged with the host and the
 // reason. This is deliberately a hard fail rather than an advisory check: an
 // agent that is merely *asked* not to leave scope will eventually leave it.
 //

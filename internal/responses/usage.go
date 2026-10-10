@@ -96,8 +96,8 @@ func firstNonZero(values ...int) int {
 // /v1/messages/count_tokens, which must never return zero: clients use the
 // figure to decide when to compact, and a zero answer disables that.
 //
-// The estimate is deliberately simple — one token per four bytes of JSON, with
-// a floor of one — because the alternative is an empty answer, and because the
+// The estimate is deliberately simple, one token per four bytes of JSON, with
+// a floor of one, because the alternative is an empty answer, and because the
 // real number is reported by the upstream usage block on every response.
 func EstimateTokens(body []byte) int {
 	if len(body) == 0 {

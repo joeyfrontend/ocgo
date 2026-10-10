@@ -4,7 +4,7 @@
     python3 scripts/check-findings.py <scope.json> <outdir> <codex-exit>
 
 Checks:
-  * findings.json parses as the schema's shape — the whole file, one object
+  * findings.json parses as the schema's shape, the whole file, one object
   * every finding carries the required fields and a valid confidence
   * no finding names a host outside the scope file
   * every egress decision in the guard log is consistent with the scope file
@@ -14,7 +14,7 @@ with the findings whose confidence meets the threshold.
 
 A model that answers correctly but wraps the answer in prose or a markdown fence
 fails the shape check. That is reported as a failure, because following
---output-schema is part of the contract — but the surrounding prose is still
+--output-schema is part of the contract, but the surrounding prose is still
 parsed for scoring, so a correct answer is never scored as an empty one.
 """
 import json

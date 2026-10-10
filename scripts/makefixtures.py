@@ -25,7 +25,12 @@ FAKE_UUIDS = [
     "44444444-4444-4444-8444-444444444444",
 ]
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
-PATH_RE = re.compile(r"/home/[A-Za-z0-9_.-]+/ocgo-capture/repo|/home/[A-Za-z0-9_.-]+/ocgo-compact/repo")
+# Any home directory, whatever it is called: a fixture must not name the machine
+# or the person it was captured on.
+HOME_RE = re.compile(r"/home/[A-Za-z0-9_.-]+")
+PATH_RE = re.compile(r"/home/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/repo")
+# The capture machine's clock settings are identifying too.
+TZ_RE = re.compile(r"<timezone>[^<]*</timezone>")
 INSTALL_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
@@ -39,8 +44,10 @@ class Sanitizer:
         return self.uuids[value]
 
     def text(self, s):
-        s = UUID_RE.sub(lambda m: self.uuid(m.group(0)), s)
         s = PATH_RE.sub("/work/repo", s)
+        s = HOME_RE.sub("/home/user", s)
+        s = TZ_RE.sub("<timezone>UTC</timezone>", s)
+        s = UUID_RE.sub(lambda m: self.uuid(m.group(0)), s)
         return s
 
     def obj(self, v):

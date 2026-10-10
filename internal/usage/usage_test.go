@@ -173,7 +173,7 @@ func TestCheckIgnoresUnknownModels(t *testing.T) {
 }
 
 // The free previews cost nothing and have no allowance, so however much is
-// spent elsewhere they must never be refused — and they must not be billed.
+// spent elsewhere they must never be refused, and they must not be billed.
 func TestFreeModelsAreUnmeteredAndCostNothing(t *testing.T) {
 	l, _ := Open("")
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)

@@ -33,7 +33,7 @@ const (
 	defaultPort                        = 3456
 	defaultBaseURL                     = "https://opencode.ai/inference/go"
 	codexProfileName                   = "ocgo-launch"
-	userAgentPrefix                    = "ocgo-hunt7"
+	userAgentPrefix                    = "ocgo"
 	maxAnthropicToolResultContentChars = 120000
 	defaultCodexModel                  = "glm-5.3-flash"
 )
@@ -368,8 +368,8 @@ var unavailableModels = map[string]bool{
 	"grok-4.7":     true,
 	"gpt-5.6-luna": true,
 	"gpt-6-luna":   true,
-	// "This Go model trains on your data" — needs a training opt-in this
-	// account has not given.
+	// The API answers "This Go model trains on your data", so these need a
+	// training opt-in that this account has not given.
 	"muse-spark-1.3-contributor": true,
 	"muse-spark-1.2-contributor": true,
 }

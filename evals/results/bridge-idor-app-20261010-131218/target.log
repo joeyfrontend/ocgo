@@ -1,4 +1,0 @@
-2026/10/10 13:12:18 idor-app listening on http://127.0.0.1:8901
-2026/10/10 13:12:28 GET /v2/me
-2026/10/10 13:12:28 GET /v2/orders/1001
-2026/10/10 13:12:29 GET /v2/orders/1001/receipt

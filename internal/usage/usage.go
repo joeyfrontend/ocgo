@@ -69,7 +69,7 @@ var peakHoursUTC = [][2]int{{1, 4}, {6, 10}}
 
 // catalog is the OpenCode Go price list. Prices are per 1M tokens, taken from
 // https://opencode.ai/docs/go/ and keyed by the model id the API actually
-// serves — several entries in the docs are prose names ("Claude Haiku 5.5")
+// serves, several entries in the docs are prose names ("Claude Haiku 5.5")
 // whose real id differs ("claude-haiku-5-5"), and a price row under the wrong
 // id silently fails to meter the model.
 //
