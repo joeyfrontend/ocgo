@@ -22,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"ocgo/internal/responses"
+	"ocgo/internal/session"
 	"ocgo/internal/trace"
 )
 
@@ -940,8 +941,9 @@ func statusCmd() *cobra.Command {
 // proxy holds the per-server state shared by every request: configuration and
 // the optional trace writer.
 type proxy struct {
-	cfg   Config
-	trace *trace.Writer
+	cfg     Config
+	trace   *trace.Writer
+	session *session.Resolver
 }
 
 func newProxy(cfg Config) (*proxy, error) {
@@ -949,8 +951,13 @@ func newProxy(cfg Config) (*proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &proxy{cfg: cfg, trace: tw}, nil
+	return &proxy{cfg: cfg, trace: tw, session: session.NewResolver()}, nil
 }
+
+// ocgoUserAgent identifies the bridge to OpenCode Go. The service asks clients
+// to identify themselves rather than present a generic SDK name, and to send a
+// stable session id per conversation.
+func ocgoUserAgent() string { return "ocgo/" + version + " (codex)" }
 
 func (p *proxy) close() error { return p.trace.Close() }
 
@@ -1119,13 +1126,12 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nativeID := sessionIDFromHeaders(r.Header)
-	conv := nativeID
-	if conv == "" {
-		conv = rr.PromptCacheKey
-	}
+	nativeID, nativeHeader := session.NativeSessionID(r.Header)
+	firstUser := firstUserMessageText(rr.Input)
+	conv := session.FirstNonEmpty(nativeID, rr.PromptCacheKey, firstUser)
+	sessionID := p.session.Derive(conv, nativeID, rr.PromptCacheKey, firstUser)
 	p.trace.LogHeaders(conv, trace.KindInbound, r.Method, r.URL.Path, r.Header, raw)
-	p.trace.Log(conv, trace.KindNote, trace.Record{Text: fmt.Sprintf("session id %q", nativeID)})
+	p.trace.Log(conv, trace.KindNote, trace.Record{Text: fmt.Sprintf("session id %q (native header %q)", sessionID, nativeHeader)})
 
 	requested := rr.Model
 	if strings.TrimSpace(requested) == "" {
@@ -1188,6 +1194,10 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", ocgoUserAgent())
+	if sessionID != "" {
+		req.Header.Set("x-opencode-session", sessionID)
+	}
 	p.trace.LogHeaders(conv, trace.KindUpstream, req.Method, upstreamURL, req.Header, body)
 	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
 	if err != nil {
@@ -1227,13 +1237,29 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// sessionIDFromHeaders returns the client's native session id, if it sent one.
-// Codex 0.162.1 sends the same value in Session-Id, Thread-Id and
-// X-Client-Request-Id.
-func sessionIDFromHeaders(h http.Header) string {
-	for _, name := range []string{"Session-Id", "Thread-Id", "X-Client-Request-Id"} {
-		if v := strings.TrimSpace(h.Get(name)); v != "" {
-			return v
+// firstUserMessageText returns the text of the first user message in a
+// Responses `input`, used as the last-resort session identity.
+func firstUserMessageText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var items []map[string]json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return ""
+	}
+	for _, item := range items {
+		var typ, role string
+		_ = json.Unmarshal(item["type"], &typ)
+		_ = json.Unmarshal(item["role"], &role)
+		if typ != "message" || (role != "" && role != "user") {
+			continue
+		}
+		if text := responsesContentText(item["content"]); text != "" {
+			return text
 		}
 	}
 	return ""
