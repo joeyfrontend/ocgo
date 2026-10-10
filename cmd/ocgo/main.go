@@ -337,7 +337,7 @@ func listCmd() *cobra.Command {
 	}}
 }
 
-var fallbackModelIDs = []string{"glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro", "deepseek-v4-flash", "qwen3.7-max", "qwen3.6-plus", "qwen3.5-plus"}
+var fallbackModelIDs = []string{"glm-5.3-flash", "glm-5.3", "glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro", "deepseek-v4-flash", "qwen3.7-max", "qwen3.6-plus", "qwen3.5-plus"}
 
 func knownModelIDs() []string {
 	if ids, err := getOfficialModels(); err == nil && len(ids) > 0 {
@@ -365,6 +365,7 @@ type openCodeModelMetadata struct {
 	CodexInputModalities    []string
 	ContextWindow           int
 	MaxContextWindow        int
+	MaxOutputTokens         int
 	UsesAnthropicEndpoint   bool
 	ParallelToolCalls       bool
 	SupportsImageOriginal   bool
@@ -384,6 +385,7 @@ func modelMetadata(model string) openCodeModelMetadata {
 		CodexInputModalities:    []string{"text"},
 		ContextWindow:           128000,
 		MaxContextWindow:        128000,
+		MaxOutputTokens:         32768,
 		DefaultReasoningLevel:   nil,
 		SupportedReasoning:      []any{},
 		DefaultReasoningSummary: "none",
@@ -401,6 +403,9 @@ func modelMetadata(model string) openCodeModelMetadata {
 			if rm.Limit.Context > 0 {
 				meta.ContextWindow = rm.Limit.Context
 				meta.MaxContextWindow = rm.Limit.Context
+			}
+			if rm.Limit.Output > 0 {
+				meta.MaxOutputTokens = rm.Limit.Output
 			}
 		}
 	}
@@ -2964,8 +2969,14 @@ func writeResponseEvent(w io.Writer, event string, payload any) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 }
 
+// countTokens answers Anthropic-shaped token counting. The figure is an
+// estimate: clients use it to decide when to compact their context, and
+// answering zero disables that decision entirely, which is worse than being
+// approximate. The authoritative figure arrives in the usage block of every
+// response.
 func countTokens(w http.ResponseWriter, r *http.Request) {
-	_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": 0})
+	body, _ := io.ReadAll(r.Body)
+	_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": responses.EstimateTokens(body)})
 }
 
 func ensureServer(base string) error {
@@ -3196,6 +3207,7 @@ func writeCodexModelCatalog(path string) error {
 			"supports_image_detail_original":   meta.SupportsImageOriginal,
 			"context_window":                   meta.ContextWindow,
 			"max_context_window":               meta.MaxContextWindow,
+			"max_output_tokens":                meta.MaxOutputTokens,
 			"auto_compact_token_limit":         nil,
 			"effective_context_window_percent": 95,
 			"experimental_supported_tools":     []any{},
