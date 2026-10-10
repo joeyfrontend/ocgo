@@ -322,23 +322,90 @@ func listCmd() *cobra.Command {
 		refreshAllModels()
 		fmt.Println("OpenCode Go models:")
 		for _, m := range knownModelIDs() {
-			fmt.Printf("  %s\n", m)
+			note := ""
+			if meta, ok := usage.Lookup(m); ok {
+				switch {
+				case meta.Free:
+					note = "  (free)"
+				case meta.Monthly > 0:
+					note = fmt.Sprintf("  ($%.0f/month allowance)", meta.Monthly)
+				}
+			}
+			fmt.Printf("  %-32s%s\n", m, note)
+		}
+		if len(unavailableModels) > 0 {
+			fmt.Printf("\nAdvertised by the API but not served (measured %s):\n", unavailableModelsMeasured)
+			for _, m := range sortedKeys(unavailableModels) {
+				fmt.Printf("  %s\n", m)
+			}
 		}
 	}}
 }
 
-var fallbackModelIDs = []string{"glm-5.3-flash", "glm-5.3", "glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro", "deepseek-v4-flash", "qwen3.7-max", "qwen3.6-plus", "qwen3.5-plus"}
+// unavailableModelsMeasured is the date the list below was checked. It is a
+// snapshot, not a property of the service: models come back, and a stale entry
+// here silently hides a working model, so re-measure before trusting it.
+const unavailableModelsMeasured = "2026-10-10"
+
+// unavailableModels are ids the API advertises but does not serve. Each was
+// probed on both wire protocols with a real credential; the reason is recorded
+// so the list can be re-checked rather than merely believed.
+//
+// Offering these in the Codex model list would be offering a trap: Codex would
+// show them, the user would pick one, and the request would fail.
+var unavailableModels = map[string]bool{
+	// "Upstream request failed: Model is unavailable."
+	"kimi-k2.5":    true,
+	"glm-5":        true,
+	"qwen3.5-plus": true,
+	"mimo-v2-pro":  true,
+	"mimo-v2-omni": true,
+	"hy3-preview":  true,
+	"grok-4.5":     true,
+	// "ModelProtocolUnsupported" on both the OpenAI and the Anthropic path, so
+	// they serve neither protocol this bridge can speak.
+	"grok-4.6":     true,
+	"grok-4.7":     true,
+	"gpt-5.6-luna": true,
+	"gpt-6-luna":   true,
+	// "This Go model trains on your data" — needs a training opt-in this
+	// account has not given.
+	"muse-spark-1.3-contributor": true,
+	"muse-spark-1.2-contributor": true,
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// available filters out the models the API advertises but does not serve.
+func available(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !unavailableModels[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+var fallbackModelIDs = []string{"glm-5.3-flash", "glm-5.3", "glm-5.1", "kimi-k2.6", "mimo-v2.5-pro", "mimo-v2.5", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4.1-flash", "deepseek-flash", "qwen3.7-max", "qwen3.6-plus", "longcat-2.5-preview-free", "space-bunny"}
 
 func knownModelIDs() []string {
 	if ids, err := getOfficialModels(); err == nil && len(ids) > 0 {
-		out := append([]string(nil), ids...)
+		out := available(append([]string(nil), ids...))
 		sort.Strings(out)
 		return out
 	}
 	if models, err := getRemoteModels(); err == nil && len(models) > 0 {
 		out := make([]string, 0, len(models))
 		for id := range models {
-			if strings.TrimSpace(id) != "" {
+			if strings.TrimSpace(id) != "" && !unavailableModels[id] {
 				out = append(out, id)
 			}
 		}

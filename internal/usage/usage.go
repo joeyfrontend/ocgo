@@ -34,6 +34,11 @@ type Model struct {
 	// PeakHours are UTC hours (start inclusive, end exclusive) that bill at the
 	// peak rate on weekdays.
 	PeakHours [][2]int
+	// Free marks a model that costs nothing and has no allowance to exhaust,
+	// such as the limited-time free previews. Free and Monthly are two ways of
+	// saying the same thing; the flag exists so `ocgo usage` and `ocgo list`
+	// can say which it is rather than showing a limit of $0.00.
+	Free bool
 }
 
 // Window is one of the three rolling allowances.
@@ -62,8 +67,14 @@ var windows = []struct {
 // UTC, Monday to Friday.
 var peakHoursUTC = [][2]int{{1, 4}, {6, 10}}
 
-// catalog is the OpenCode Go price list, taken from
-// https://opencode.ai/docs/go/ (captured 2026-10-10). Prices are per 1M tokens.
+// catalog is the OpenCode Go price list. Prices are per 1M tokens, taken from
+// https://opencode.ai/docs/go/ and keyed by the model id the API actually
+// serves — several entries in the docs are prose names ("Claude Haiku 5.5")
+// whose real id differs ("claude-haiku-5-5"), and a price row under the wrong
+// id silently fails to meter the model.
+//
+// A model whose Monthly is zero is unmetered: the free previews have no
+// allowance to exhaust, so the guard must never refuse them.
 var catalog = []Model{
 	{ID: "glm-5.3-flash", Prices: Prices{0.15, 0.50, 0.03}, Monthly: 60},
 	{ID: "glm-5.3", Prices: Prices{1.40, 4.40, 0.26}, Monthly: 15},
@@ -73,23 +84,31 @@ var catalog = []Model{
 	{ID: "kimi-k3", Prices: Prices{3.00, 15.00, 0.30}, Monthly: 15},
 	{ID: "kimi-k2.7-code", Prices: Prices{0.95, 4.00, 0.19}, Monthly: 60},
 	{ID: "kimi-k2.6", Prices: Prices{0.95, 4.00, 0.16}, Monthly: 60},
+	{ID: "kimi-k2.5", Prices: Prices{0.95, 4.00, 0.16}, Monthly: 60},
 	{ID: "longcat-2.0", Prices: Prices{0.30, 1.20, 0.006}, Monthly: 60},
+	// Free previews: no prices, no allowance.
+	{ID: "longcat-2.5-preview-free", Free: true},
+	{ID: "step-5-preview-free", Free: true},
 	{ID: "mimo-v2.6-flash", Prices: Prices{0.14, 0.28, 0.0028}, Monthly: 60},
 	{ID: "mimo-v2.6-pro", Prices: Prices{0.435, 0.87, 0.003625}, Monthly: 15},
 	{ID: "mimo-v2.5", Prices: Prices{0.14, 0.28, 0.0028}, Monthly: 60},
 	{ID: "mimo-v2.5-pro", Prices: Prices{0.435, 0.87, 0.003625}, Monthly: 15},
+	{ID: "mimo-v2-pro", Prices: Prices{0.435, 0.87, 0.003625}, Monthly: 15},
+	{ID: "mimo-v2-omni", Prices: Prices{0.435, 0.87, 0.003625}, Monthly: 15},
 	{ID: "minimax-m3", Prices: Prices{0.30, 1.20, 0.06}, Monthly: 60},
 	{ID: "minimax-m2.7", Prices: Prices{0.30, 1.20, 0.06}, Monthly: 60},
-	{ID: "muse-spark-1.3", Prices: Prices{0.10, 0.20, 0.002}, Monthly: 60},
-	{ID: "muse-spark-1.2", Prices: Prices{0.10, 0.20, 0.002}, Monthly: 60},
-	{
-		ID: "qwen3.8-max", Prices: Prices{2.00, 6.00, 0.25}, Monthly: 15,
-	},
+	{ID: "minimax-m2.5", Prices: Prices{0.30, 1.20, 0.06}, Monthly: 60},
+	{ID: "muse-spark-1.3-contributor", Prices: Prices{0.10, 0.20, 0.002}, Monthly: 60},
+	{ID: "muse-spark-1.2-contributor", Prices: Prices{0.10, 0.20, 0.002}, Monthly: 60},
+	{ID: "qwen3.8-max", Prices: Prices{2.00, 6.00, 0.25}, Monthly: 15},
 	{ID: "qwen3.8-flash", Prices: Prices{0.15, 0.47, 0.016}, Monthly: 30},
+	{ID: "qwen3.7-max", Prices: Prices{2.00, 6.00, 0.25}, Monthly: 15},
 	{
 		ID: "qwen3.7-plus", Prices: Prices{0.40, 1.60, 0.04}, Monthly: 60,
 		TierAbove: 256000, TierPrices: Prices{1.20, 4.80, 0.12},
 	},
+	{ID: "qwen3.6-plus", Prices: Prices{0.40, 1.60, 0.04}, Monthly: 60},
+	{ID: "qwen3.5-plus", Prices: Prices{0.40, 1.60, 0.04}, Monthly: 60},
 	{
 		ID: "deepseek-v4.1-flash", Monthly: 60, PeakHours: peakHoursUTC,
 		Peak: Prices{0.30, 1.20, 0.006}, OffPeak: Prices{0.15, 0.60, 0.003},
@@ -103,11 +122,16 @@ var catalog = []Model{
 		Peak: Prices{0.30, 1.20, 0.006}, OffPeak: Prices{0.15, 0.60, 0.003},
 	},
 	{
+		ID: "deepseek-flash", Monthly: 30, PeakHours: peakHoursUTC,
+		Peak: Prices{0.30, 1.20, 0.006}, OffPeak: Prices{0.15, 0.60, 0.003},
+	},
+	{
 		ID: "deepseek-v4-flash-vision-exp", Monthly: 15, PeakHours: peakHoursUTC,
 		Peak: Prices{0.30, 1.20, 0.006}, OffPeak: Prices{0.15, 0.60, 0.003},
 	},
 	{ID: "hy4-preview", Prices: Prices{0.834, 2.501, 0.042}, Monthly: 30},
 	{ID: "hy3", Prices: Prices{0.14, 0.58, 0.035}, Monthly: 60},
+	{ID: "hy3-preview", Prices: Prices{0.14, 0.58, 0.035}, Monthly: 60},
 	{ID: "space-bunny", Prices: Prices{0.15, 0.60, 0.03}, Monthly: 30},
 	{
 		ID: "grok-4.7", Prices: Prices{2.00, 6.00, 0.50}, Monthly: 15,
@@ -115,6 +139,10 @@ var catalog = []Model{
 	},
 	{
 		ID: "grok-4.6", Prices: Prices{2.00, 6.00, 0.50}, Monthly: 15,
+		TierAbove: 200000, TierPrices: Prices{4.00, 12.00, 1.00},
+	},
+	{
+		ID: "grok-4.5", Prices: Prices{2.00, 6.00, 0.50}, Monthly: 15,
 		TierAbove: 200000, TierPrices: Prices{4.00, 12.00, 1.00},
 	},
 	{
@@ -126,7 +154,7 @@ var catalog = []Model{
 		TierAbove: 272000, TierPrices: Prices{0.40, 1.80, 0.04},
 	},
 	{
-		ID: "claude-haiku-5.5", Prices: Prices{0.10, 0.50, 0.01}, Monthly: 15,
+		ID: "claude-haiku-5-5", Prices: Prices{0.10, 0.50, 0.01}, Monthly: 15,
 		TierAbove: 100000, TierPrices: Prices{0.50, 2.50, 0.05},
 	},
 }
@@ -176,6 +204,9 @@ func isPeak(hours [][2]int, now time.Time) bool {
 // Cost returns the dollar cost of one request. Cached input tokens are billed
 // at the cached-read rate and are not billed again at the input rate.
 func Cost(m Model, input, cached, output int, now time.Time) float64 {
+	if m.Free {
+		return 0
+	}
 	p := PricesFor(m, input, now)
 	billable := input - cached
 	if billable < 0 {
