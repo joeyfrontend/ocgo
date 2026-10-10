@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ocgo headless run findings",
+  "description": "Findings produced by a scope-enforced Codex run. Consumed by scripts/check-findings.py and, above the confidence threshold, queued for independent validation.",
+  "type": "object",
+  "required": ["findings"],
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "One paragraph on what the run did and did not establish."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["title", "asset", "class", "confidence", "evidence", "repro_steps"],
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 8,
+            "description": "One line naming the defect and its consequence."
+          },
+          "asset": {
+            "type": "string",
+            "minLength": 3,
+            "description": "The in-scope host the finding applies to."
+          },
+          "class": {
+            "type": "string",
+            "minLength": 3,
+            "description": "The bug class, for example broken_access_control or information_disclosure."
+          },
+          "confidence": {
+            "type": "string",
+            "enum": ["low", "medium", "high"]
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Raw requests and responses, quoted, that show the behaviour."
+          },
+          "repro_steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 },
+            "description": "Ordered steps another person can follow."
+          },
+          "impact": {
+            "type": "string",
+            "description": "What an attacker gains, in the programme's terms."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "Method and path."
+          },
+          "caveats": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "What was not tested, or what would falsify this."
+          }
+        }
+      }
+    }
+  }
+}
