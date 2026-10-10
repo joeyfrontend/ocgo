@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"ocgo/internal/responses"
+	"ocgo/internal/trace"
 )
 
 const (
@@ -165,6 +167,13 @@ type Config struct {
 	// BaseURL overrides the inference host and prefix, because the endpoint has
 	// already moved once and following it should not need a new release.
 	BaseURL string `json:"base_url,omitempty"`
+
+	// TraceDir records every conversation as JSONL. Empty disables tracing.
+	TraceDir string `json:"-"`
+	// Upstream overrides the chat-completions endpoint. It exists so the proxy
+	// can be exercised end to end against a local stand-in, without spending
+	// the subscription's allowance to test the plumbing.
+	Upstream string `json:"-"`
 }
 
 type AnthropicRequest struct {
@@ -863,6 +872,8 @@ func launchCmd() *cobra.Command {
 
 func serveCmd() *cobra.Command {
 	var background bool
+	var upstream string
+	var traceDir string
 	cmd := &cobra.Command{Use: "serve", Short: "Start local Anthropic-compatible proxy", RunE: func(cmd *cobra.Command, args []string) error {
 		if background {
 			return startBackground()
@@ -871,9 +882,13 @@ func serveCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		cfg.Upstream = upstream
+		cfg.TraceDir = traceDir
 		return runServer(cfg)
 	}}
+	cmd.Flags().StringVar(&upstream, "upstream", "", "Override the upstream chat-completions endpoint")
 	cmd.Flags().BoolVarP(&background, "background", "b", false, "Run proxy in the background")
+	cmd.Flags().StringVar(&traceDir, "trace", "", "Write a JSONL trace of every conversation to this directory")
 	return cmd
 }
 
@@ -922,18 +937,55 @@ func statusCmd() *cobra.Command {
 	}}
 }
 
+// proxy holds the per-server state shared by every request: configuration and
+// the optional trace writer.
+type proxy struct {
+	cfg   Config
+	trace *trace.Writer
+}
+
+func newProxy(cfg Config) (*proxy, error) {
+	tw, err := trace.Open(cfg.TraceDir, cfg.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	return &proxy{cfg: cfg, trace: tw}, nil
+}
+
+func (p *proxy) close() error { return p.trace.Close() }
+
 func runServer(cfg Config) error {
 	if err := os.MkdirAll(configDir(), 0755); err == nil {
 		_ = os.WriteFile(pidFile(), []byte(fmt.Sprint(os.Getpid())), 0644)
 		defer os.Remove(pidFile())
+	}
+	p, err := newProxy(cfg)
+	if err != nil {
+		return err
+	}
+	defer p.close()
+	if dir := p.trace.Dir(); dir != "" {
+		fmt.Printf("ocgo trace: recording conversations in %s\n", dir)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("/v1/messages/count_tokens", countTokens)
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) { proxyMessages(w, r, cfg) })
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { proxyChatCompletions(w, r, cfg) })
-	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) { proxyResponses(w, r, cfg) })
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	mux.HandleFunc("/v1/responses", p.responses)
+	// Catch-all: a client reaching any other path is a finding in itself (for
+	// example a compaction endpoint), so record it rather than 404 silently.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		conv := r.Header.Get("Session-Id")
+		if conv == "" {
+			conv = r.Header.Get("Thread-Id")
+		}
+		p.trace.LogHeaders(conv, trace.KindInbound, r.Method, r.URL.Path, r.Header, body)
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: "unhandled endpoint: " + r.URL.Path})
+		http.NotFound(w, r)
+	})
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	fmt.Printf("ocgo proxy listening on http://%s\n", addr)
 	return http.ListenAndServe(addr, mux)
 }
@@ -1051,7 +1103,7 @@ func proxyChatCompletions(w http.ResponseWriter, r *http.Request, cfg Config) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
+func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1067,6 +1119,14 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 
+	nativeID := sessionIDFromHeaders(r.Header)
+	conv := nativeID
+	if conv == "" {
+		conv = rr.PromptCacheKey
+	}
+	p.trace.LogHeaders(conv, trace.KindInbound, r.Method, r.URL.Path, r.Header, raw)
+	p.trace.Log(conv, trace.KindNote, trace.Record{Text: fmt.Sprintf("session id %q", nativeID)})
+
 	requested := rr.Model
 	if strings.TrimSpace(requested) == "" {
 		requested = defaultCodexModel
@@ -1080,15 +1140,20 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	out := io.Writer(w)
+	if p.trace != nil {
+		out = &traceWriter{w: w, trace: p.trace, conv: conv}
+	}
 	translator := responses.TranslatorOptions{
-		Writer:           w,
+		Writer:           out,
 		Model:            or.Model,
 		ReasoningSummary: reasoningSummaryEnabled(),
+		Warn:             func(msg string) { p.trace.Log(conv, trace.KindNote, trace.Record{Text: "translator: " + msg}) },
 	}
 
 	if modelUsesAnthropicEndpoint(or.Model) {
 		or.Model = modelID(or.Model)
-		resp, err := forwardAnthropic(r.Context(), cfg, chatToAnthropic(or))
+		resp, err := forwardAnthropic(r.Context(), p.cfg, chatToAnthropic(or))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1107,18 +1172,23 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 
+	upstreamURL := chatCompletionsURL(p.cfg)
+	if u := strings.TrimSpace(p.cfg.Upstream); u != "" {
+		upstreamURL = u
+	}
 	body, err := json.Marshal(chat)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, chatCompletionsURL(cfg), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
+	p.trace.LogHeaders(conv, trace.KindUpstream, req.Method, upstreamURL, req.Header, body)
 	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -1126,9 +1196,10 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		errBody, _ := io.ReadAll(resp.Body)
 		code := fmt.Sprintf("upstream_%d", resp.StatusCode)
+		errBody, _ := io.ReadAll(resp.Body)
 		message := firstN(strings.TrimSpace(string(errBody)), 2000)
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: fmt.Sprintf("upstream status %d: %s", resp.StatusCode, message)})
 		if rr.Stream {
 			// A failure after the client has committed to SSE must arrive as a
 			// response.failed event; a changed HTTP status is no longer visible.
@@ -1141,15 +1212,78 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": message}})
 		return
 	}
+	stream := io.Reader(resp.Body)
+	if p.trace != nil {
+		stream = &traceReader{r: resp.Body, trace: p.trace, conv: conv}
+	}
 	if rr.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = responses.TranslateStream(w, resp.Body, translator)
+		_, _ = responses.TranslateStream(out, stream, translator)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if _, err := responses.TranslateResponse(w, resp.Body, translator); err != nil {
+	if _, err := responses.TranslateResponse(out, stream, translator); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 	}
+}
+
+// sessionIDFromHeaders returns the client's native session id, if it sent one.
+// Codex 0.162.1 sends the same value in Session-Id, Thread-Id and
+// X-Client-Request-Id.
+func sessionIDFromHeaders(h http.Header) string {
+	for _, name := range []string{"Session-Id", "Thread-Id", "X-Client-Request-Id"} {
+		if v := strings.TrimSpace(h.Get(name)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// traceWriter records each outbound event block as it is written downstream.
+type traceWriter struct {
+	w     io.Writer
+	trace *trace.Writer
+	conv  string
+}
+
+func (t *traceWriter) Write(b []byte) (int, error) {
+	t.trace.Log(t.conv, trace.KindEvent, trace.Record{Text: strings.TrimRight(string(b), "\n")})
+	return t.w.Write(b)
+}
+
+// Flush forwards to the wrapped writer so wrapping for tracing does not
+// silently disable streaming.
+func (t *traceWriter) Flush() {
+	if f, ok := t.w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// traceReader records the upstream stream one SSE line at a time.
+type traceReader struct {
+	r     io.Reader
+	trace *trace.Writer
+	conv  string
+	buf   []byte
+}
+
+func (t *traceReader) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 {
+		t.buf = append(t.buf, p[:n]...)
+		for {
+			i := bytes.IndexByte(t.buf, '\n')
+			if i < 0 {
+				break
+			}
+			line := strings.TrimRight(string(t.buf[:i]), "\r")
+			t.buf = t.buf[i+1:]
+			if line != "" {
+				t.trace.Log(t.conv, trace.KindChunk, trace.Record{Text: line})
+			}
+		}
+	}
+	return n, err
 }
 
 // reasoningSummaryEnabled reports whether reasoning items should be emitted.
