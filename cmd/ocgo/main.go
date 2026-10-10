@@ -3136,7 +3136,16 @@ func startServerProcess(detached bool) (*exec.Cmd, error) {
 func configDir() string  { home, _ := os.UserHomeDir(); return filepath.Join(home, ".config", "ocgo") }
 func configFile() string { return filepath.Join(configDir(), "config.json") }
 func pidFile() string    { return filepath.Join(configDir(), "ocgo.pid") }
-func usageFile() string  { return filepath.Join(configDir(), "usage.json") }
+
+// usageFile returns the spend ledger's path. OCGO_USAGE_FILE overrides it so a
+// test can exercise the guard without touching the real ledger, which would
+// otherwise be a self-inflicted way to block a working session.
+func usageFile() string {
+	if override := strings.TrimSpace(os.Getenv("OCGO_USAGE_FILE")); override != "" {
+		return override
+	}
+	return filepath.Join(configDir(), "usage.json")
+}
 
 var modelMappingFile = func() string { return filepath.Join(configDir(), "model-mapping.json") }
 

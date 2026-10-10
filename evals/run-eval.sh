@@ -84,6 +84,11 @@ case "$HARNESS" in
   bridge)
     export OCGO_API_KEY="${OCGO_API_KEY:-unset}"
     MOCK_PID=""
+    # A scripted upstream reports fixed usage figures; recording them would put
+    # imaginary dollars in the real spend ledger. A mock run gets its own.
+    if [ "$MODE" = "--mock" ]; then
+      export OCGO_USAGE_FILE="$OUT/usage.json"
+    fi
     if [ "$MODE" = "--mock" ]; then
       "$ROOT/bin/mockglm" -addr 127.0.0.1:3457 -turns-file "$OUT/turns.json" \
         >"$OUT/mock.log" 2>&1 &

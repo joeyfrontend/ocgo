@@ -22,6 +22,10 @@ go build -o bin/ocgo ./cmd/ocgo || exit 1
 go build -o bin/mockglm ./cmd/mockglm || exit 1
 
 export OCGO_API_KEY=soak-test-key
+
+# The scripted upstream reports fixed usage figures, so recording them would
+# put imaginary dollars into the real spend ledger. A soak gets its own.
+export OCGO_USAGE_FILE="$WORK/usage.json"
 bin/ocgo launch codex --config >/dev/null || exit 1
 
 cd "$WORK/repo" || exit 1
