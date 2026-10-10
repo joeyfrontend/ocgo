@@ -5,3 +5,9 @@ dist/
 .env
 .tmp/
 oc-go-cc
+
+# Proxy traces and captured traffic: they can contain bug-bounty target data
+# and must never be committed.
+traces/
+*.jsonl
+config.json

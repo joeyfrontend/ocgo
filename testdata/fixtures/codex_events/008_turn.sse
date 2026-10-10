@@ -1,0 +1,32 @@
+event: response.created
+data: {"response":{"id":"resp_ocgo","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"type":"response.created"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","type":"function_call"},"output_index":0,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"cmd\":","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"\"echo t","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"urn-4 \\","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"u0026\\u","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"0026 ls","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":" -la\"}","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{\"cmd\":\"echo turn-4 \\u0026\\u0026 ls -la\"}","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{\"cmd\":\"echo turn-4 \\u0026\\u0026 ls -la\"}","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","type":"function_call"},"output_index":0,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"id":"resp_ocgo","model":"glm-5.3-flash","object":"response","output":[{"arguments":"{\"cmd\":\"echo turn-4 \\u0026\\u0026 ls -la\"}","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","type":"function_call"}],"status":"completed","usage":{"input_tokens":960000,"input_tokens_details":{"cached_tokens":1024},"output_tokens":45,"total_tokens":960045}},"type":"response.completed"}

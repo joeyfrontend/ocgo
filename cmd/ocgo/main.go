@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,6 +21,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"ocgo/internal/session"
+	"ocgo/internal/trace"
 )
 
 const (
@@ -28,6 +31,7 @@ const (
 	defaultPort                        = 3456
 	openAIURL                          = "https://opencode.ai/zen/go/v1/chat/completions"
 	codexProfileName                   = "ocgo-launch"
+	userAgentPrefix                    = "ocgo-hunt7"
 	maxAnthropicToolResultContentChars = 120000
 )
 
@@ -122,6 +126,12 @@ type Config struct {
 	APIKey string `json:"api_key"`
 	Host   string `json:"host"`
 	Port   int    `json:"port"`
+
+	// TraceDir records every conversation as JSONL. Empty disables tracing.
+	TraceDir string `json:"-"`
+	// Upstream overrides the chat-completions endpoint, used by tests and by
+	// the local mock upstream.
+	Upstream string `json:"-"`
 }
 
 type AnthropicRequest struct {
@@ -176,21 +186,24 @@ type OAIStreamOptions struct {
 }
 
 type ResponsesRequest struct {
-	Model           string          `json:"model"`
-	Input           json.RawMessage `json:"input"`
-	Instructions    string          `json:"instructions,omitempty"`
-	Stream          bool            `json:"stream,omitempty"`
-	MaxTokens       int             `json:"max_output_tokens,omitempty"`
-	Temperature     *float64        `json:"temperature,omitempty"`
-	TopP            *float64        `json:"top_p,omitempty"`
-	Tools           []ResponseTool  `json:"tools,omitempty"`
-	Thinking        json.RawMessage `json:"thinking,omitempty"`
-	Reasoning       json.RawMessage `json:"reasoning,omitempty"`
-	ReasoningEffort json.RawMessage `json:"reasoning_effort,omitempty"`
-	Effort          json.RawMessage `json:"effort,omitempty"`
-	Level           json.RawMessage `json:"level,omitempty"`
-	Depth           json.RawMessage `json:"depth,omitempty"`
-	OutputConfig    json.RawMessage `json:"output_config,omitempty"`
+	Model              string          `json:"model"`
+	Input              json.RawMessage `json:"input"`
+	Instructions       string          `json:"instructions,omitempty"`
+	Stream             bool            `json:"stream,omitempty"`
+	MaxTokens          int             `json:"max_output_tokens,omitempty"`
+	Temperature        *float64        `json:"temperature,omitempty"`
+	TopP               *float64        `json:"top_p,omitempty"`
+	Tools              []ResponseTool  `json:"tools,omitempty"`
+	Thinking           json.RawMessage `json:"thinking,omitempty"`
+	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
+	ReasoningEffort    json.RawMessage `json:"reasoning_effort,omitempty"`
+	Effort             json.RawMessage `json:"effort,omitempty"`
+	Level              json.RawMessage `json:"level,omitempty"`
+	Depth              json.RawMessage `json:"depth,omitempty"`
+	OutputConfig       json.RawMessage `json:"output_config,omitempty"`
+	PromptCacheKey     string          `json:"prompt_cache_key,omitempty"`
+	Store              *bool           `json:"store,omitempty"`
+	PreviousResponseID string          `json:"previous_response_id,omitempty"`
 }
 
 type ResponseTool struct {
@@ -830,6 +843,8 @@ func launchCmd() *cobra.Command {
 
 func serveCmd() *cobra.Command {
 	var background bool
+	var traceDir string
+	var upstream string
 	cmd := &cobra.Command{Use: "serve", Short: "Start local Anthropic-compatible proxy", RunE: func(cmd *cobra.Command, args []string) error {
 		if background {
 			return startBackground()
@@ -838,9 +853,13 @@ func serveCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		cfg.TraceDir = traceDir
+		cfg.Upstream = upstream
 		return runServer(cfg)
 	}}
 	cmd.Flags().BoolVarP(&background, "background", "b", false, "Run proxy in the background")
+	cmd.Flags().StringVar(&traceDir, "trace", "", "Write a JSONL trace of every conversation to this directory")
+	cmd.Flags().StringVar(&upstream, "upstream", "", "Override the upstream chat-completions endpoint")
 	return cmd
 }
 
@@ -889,18 +908,76 @@ func statusCmd() *cobra.Command {
 	}}
 }
 
+// proxy holds the per-server state shared by every request: configuration, the
+// optional trace writer and the conversation-to-session resolver.
+type proxy struct {
+	cfg     Config
+	trace   *trace.Writer
+	session *session.Resolver
+}
+
+func newProxy(cfg Config) (*proxy, error) {
+	tw, err := trace.Open(cfg.TraceDir, cfg.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	return &proxy{cfg: cfg, trace: tw, session: session.NewResolver()}, nil
+}
+
+func (p *proxy) close() error { return p.trace.Close() }
+
+func (p *proxy) upstreamURL() string {
+	if u := strings.TrimSpace(p.cfg.Upstream); u != "" {
+		return u
+	}
+	return openAIURL
+}
+
+func ocgoUserAgent() string { return userAgentPrefix + "/" + version + " (codex)" }
+
+func (p *proxy) newUpstreamRequest(ctx context.Context, url string, body []byte, sessionID string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", ocgoUserAgent())
+	if sessionID != "" {
+		req.Header.Set("x-opencode-session", sessionID)
+	}
+	return req, nil
+}
+
 func runServer(cfg Config) error {
 	if err := os.MkdirAll(configDir(), 0755); err == nil {
 		_ = os.WriteFile(pidFile(), []byte(fmt.Sprint(os.Getpid())), 0644)
 		defer os.Remove(pidFile())
+	}
+	p, err := newProxy(cfg)
+	if err != nil {
+		return err
+	}
+	defer p.close()
+	if dir := p.trace.Dir(); dir != "" {
+		fmt.Printf("ocgo trace: recording conversations in %s\n", dir)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("/v1/messages/count_tokens", countTokens)
 	mux.HandleFunc("/v1/messages", func(w http.ResponseWriter, r *http.Request) { proxyMessages(w, r, cfg) })
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) { proxyChatCompletions(w, r, cfg) })
-	mux.HandleFunc("/v1/responses", func(w http.ResponseWriter, r *http.Request) { proxyResponses(w, r, cfg) })
-	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
+	mux.HandleFunc("/v1/responses", p.responses)
+	// Catch-all: a client reaching any other path is a finding in itself (for
+	// example a compaction endpoint), so record it rather than 404 silently.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		conv := session.FirstNonEmpty(r.Header.Get("Session-Id"), r.Header.Get("Thread-Id"))
+		p.trace.LogHeaders(conv, trace.KindInbound, r.Method, r.URL.Path, r.Header, body)
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: "unhandled endpoint: " + r.URL.Path})
+		http.NotFound(w, r)
+	})
+	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	fmt.Printf("ocgo proxy listening on http://%s\n", addr)
 	return http.ListenAndServe(addr, mux)
 }
@@ -1018,24 +1095,41 @@ func proxyChatCompletions(w http.ResponseWriter, r *http.Request, cfg Config) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
+func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	var rr ResponsesRequest
-	if err := json.NewDecoder(r.Body).Decode(&rr); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
+	var rr ResponsesRequest
+	if err := json.Unmarshal(raw, &rr); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+
+	nativeID, nativeHeader := session.NativeSessionID(r.Header)
+	firstUser := firstUserMessageText(rr.Input)
+	conv := session.FirstNonEmpty(nativeID, rr.PromptCacheKey, firstUser)
+	sessionID := p.session.Derive(conv, nativeID, rr.PromptCacheKey, firstUser)
+	p.trace.LogHeaders(conv, trace.KindInbound, r.Method, r.URL.Path, r.Header, raw)
+	p.trace.Log(conv, trace.KindNote, trace.Record{Text: fmt.Sprintf("session id %q (native header %q)", sessionID, nativeHeader)})
+
 	or := responsesToChat(rr)
 	if err := validateImageSupport(or); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	out := io.Writer(w)
+	if p.trace != nil {
+		out = &traceWriter{w: w, trace: p.trace, conv: conv}
+	}
 	if modelUsesAnthropicEndpoint(or.Model) {
 		or.Model = modelID(or.Model)
-		resp, err := forwardAnthropic(r.Context(), cfg, chatToAnthropic(or))
+		resp, err := forwardAnthropic(r.Context(), p.cfg, chatToAnthropic(or))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -1054,29 +1148,112 @@ func proxyResponses(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 	body, _ := json.Marshal(or)
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, openAIURL, bytes.NewReader(body))
+	url := p.upstreamURL()
+	req, err := p.newUpstreamRequest(r.Context(), url, body, sessionID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	req.Header.Set("Content-Type", "application/json")
+	p.trace.LogHeaders(conv, trace.KindUpstream, req.Method, url, req.Header, body)
 	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
 	if err != nil {
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: err.Error()})
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(resp.Body)
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: fmt.Sprintf("upstream status %d: %s", resp.StatusCode, firstN(string(errBody), 2000))})
 		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		_, _ = w.Write(errBody)
 		return
+	}
+	stream := io.Reader(resp.Body)
+	if p.trace != nil {
+		stream = &traceReader{r: resp.Body, trace: p.trace, conv: conv}
 	}
 	if rr.Stream {
-		streamResponses(w, resp.Body, or.Model)
+		w.Header().Set("Content-Type", "text/event-stream")
+		streamResponses(out, stream, or.Model)
 		return
 	}
-	writeResponsesResponse(w, resp.Body, or.Model)
+	w.Header().Set("Content-Type", "application/json")
+	writeResponsesResponse(out, stream, or.Model)
+}
+
+// traceWriter records each outbound event block as it is written downstream.
+type traceWriter struct {
+	w     io.Writer
+	trace *trace.Writer
+	conv  string
+}
+
+func (t *traceWriter) Write(b []byte) (int, error) {
+	t.trace.Log(t.conv, trace.KindEvent, trace.Record{Text: strings.TrimRight(string(b), "\n")})
+	return t.w.Write(b)
+}
+
+// traceReader records the upstream stream one SSE line at a time.
+type traceReader struct {
+	r     io.Reader
+	trace *trace.Writer
+	conv  string
+	buf   []byte
+}
+
+func (t *traceReader) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 {
+		t.buf = append(t.buf, p[:n]...)
+		for {
+			i := bytes.IndexByte(t.buf, '\n')
+			if i < 0 {
+				break
+			}
+			line := strings.TrimRight(string(t.buf[:i]), "\r")
+			t.buf = t.buf[i+1:]
+			if line != "" {
+				t.trace.Log(t.conv, trace.KindChunk, trace.Record{Text: line})
+			}
+		}
+	}
+	return n, err
+}
+
+// firstUserMessageText returns the text of the first user message in a
+// Responses `input`, used as the last-resort session identity.
+func firstUserMessageText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var items []map[string]json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return ""
+	}
+	for _, item := range items {
+		var typ, role string
+		_ = json.Unmarshal(item["type"], &typ)
+		_ = json.Unmarshal(item["role"], &role)
+		if typ != "message" || (role != "" && role != "user") {
+			continue
+		}
+		if text := responsesContentText(item["content"]); text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 func copyHeaders(dst, src http.Header) {
@@ -2791,8 +2968,7 @@ func readSSE(body io.Reader, handle func(event string, data []byte) bool) {
 	_ = flush()
 }
 
-func streamResponses(w http.ResponseWriter, body io.Reader, model string) {
-	w.Header().Set("Content-Type", "text/event-stream")
+func streamResponses(w io.Writer, body io.Reader, model string) {
 	flusher, _ := w.(http.Flusher)
 	id := "resp_ocgo"
 	writeResponseEvent(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "in_progress", "output": []any{}}})
@@ -2948,7 +3124,7 @@ func writeResponseEvent(w io.Writer, event string, payload any) {
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
 }
 
-func writeResponsesResponse(w http.ResponseWriter, body io.Reader, model string) {
+func writeResponsesResponse(w io.Writer, body io.Reader, model string) {
 	var v struct {
 		Choices []struct {
 			Message struct {
@@ -2974,7 +3150,6 @@ func writeResponsesResponse(w http.ResponseWriter, body io.Reader, model string)
 	if len(output) == 0 {
 		output = append(output, map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text}}})
 	}
-	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_ocgo", "object": "response", "created_at": time.Now().Unix(), "model": model, "status": "completed", "output": output, "usage": responsesUsage(usageFromJSON(v.Usage))})
 }
 

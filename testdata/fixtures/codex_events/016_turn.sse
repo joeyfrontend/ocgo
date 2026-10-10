@@ -1,0 +1,20 @@
+event: response.created
+data: {"response":{"id":"resp_ocgo","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"type":"response.created"}
+
+event: response.output_item.added
+data: {"item":{"content":[],"id":"msg_ocgo","role":"assistant","type":"message"},"output_index":0,"type":"response.output_item.added"}
+
+event: response.content_part.added
+data: {"content_index":0,"item_id":"msg_ocgo","output_index":0,"part":{"text":"","type":"output_text"},"type":"response.content_part.added"}
+
+event: response.output_text.delta
+data: {"content_index":0,"delta":"Done.","item_id":"msg_ocgo","output_index":0,"type":"response.output_text.delta"}
+
+event: response.output_text.done
+data: {"content_index":0,"item_id":"msg_ocgo","output_index":0,"text":"Done.","type":"response.output_text.done"}
+
+event: response.output_item.done
+data: {"item":{"content":[{"text":"Done.","type":"output_text"}],"id":"msg_ocgo","role":"assistant","type":"message"},"output_index":0,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"id":"resp_ocgo","model":"glm-5.3-flash","object":"response","output":[{"content":[{"text":"Done.","type":"output_text"}],"id":"msg_ocgo","role":"assistant","type":"message"}],"status":"completed","usage":{"input_tokens":960000,"input_tokens_details":{"cached_tokens":1024},"output_tokens":45,"total_tokens":960045}},"type":"response.completed"}

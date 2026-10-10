@@ -1,0 +1,38 @@
+event: response.created
+data: {"response":{"id":"resp_ocgo","model":"glm-5.3-flash","object":"response","output":[],"status":"in_progress"},"type":"response.created"}
+
+event: response.output_item.added
+data: {"item":{"arguments":"","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","type":"function_call"},"output_index":0,"type":"response.output_item.added"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"{\"cmd\":","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"\"ls -la","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":" \\u0026","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"\\u0026 ","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"sed -n ","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"'1,20p'","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":" calc.p","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.delta
+data: {"delta":"y\"}","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.delta"}
+
+event: response.function_call_arguments.done
+data: {"arguments":"{\"cmd\":\"ls -la \\u0026\\u0026 sed -n '1,20p' calc.py\"}","item_id":"call_mock_1","output_index":0,"type":"response.function_call_arguments.done"}
+
+event: response.output_item.done
+data: {"item":{"arguments":"{\"cmd\":\"ls -la \\u0026\\u0026 sed -n '1,20p' calc.py\"}","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","type":"function_call"},"output_index":0,"type":"response.output_item.done"}
+
+event: response.completed
+data: {"response":{"id":"resp_ocgo","model":"glm-5.3-flash","object":"response","output":[{"arguments":"{\"cmd\":\"ls -la \\u0026\\u0026 sed -n '1,20p' calc.py\"}","call_id":"call_mock_1","id":"call_mock_1","name":"exec_command","type":"function_call"}],"status":"completed","usage":{"input_tokens":1200,"input_tokens_details":{"cached_tokens":1024},"output_tokens":45,"total_tokens":1245}},"type":"response.completed"}
