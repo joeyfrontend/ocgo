@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Headless, scope-enforced Codex run.
 #
-#   scripts/hunt7-run.sh <scope.json> <outdir> <prompt>
+#   scripts/scoped-run.sh <scope.json> <outdir> <prompt>
 #
 # The agent's egress goes through ocgo-guard, which only dials hosts named in
 # the scope file. Anything else is refused with 403 and logged. Findings are
