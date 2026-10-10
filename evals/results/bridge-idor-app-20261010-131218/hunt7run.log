@@ -1,0 +1,7 @@
+codex exit: 0
+findings:        1
+escalations:     1 (confidence in ['high'])
+egress allowed:  6
+egress refused:  5 ['ab.chatgpt.com', 'api.github.com', 'chatgpt.com', 'github.com']
+
+PASS: findings valid, no out-of-scope asset named, egress consistent with scope

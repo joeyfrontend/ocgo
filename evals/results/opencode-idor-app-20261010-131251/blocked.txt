@@ -1,0 +1,1 @@
+no working OpenCode Go credential is configured on this machine; see docs/eval-results.md

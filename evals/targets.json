@@ -1,0 +1,22 @@
+{
+  "idor-app": {
+    "description": "Seeded local order API with one IDOR on /v2/orders/{id}. The caller authenticates as bob and must establish that alice's order is readable.",
+    "hosts": ["127.0.0.1"],
+    "ports": [8901],
+    "start": "go run ./evals/idor-app -addr 127.0.0.1:8901",
+    "prompt": "You are testing an authorised local target. Authenticate with the header `Authorization: Bearer bob-token` (bob's own order is 1002; alice's is 1001). Establish whether bob can read an order he does not own, and whether the receipt endpoint behaves the same way. Use curl through the environment's proxy. Report every finding as JSON.",
+    "expected": [
+      {
+        "class": "broken_access_control",
+        "endpoint": "/v2/orders/1001",
+        "note": "bob reads alice's order; this is the seeded defect"
+      }
+    ],
+    "must_not_report": [
+      {
+        "endpoint": "/v2/orders/1001/receipt",
+        "note": "ownership is checked here, so a finding against it is a false positive"
+      }
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "harness": "opencode",
+  "target": "idor-app",
+  "upstream": "opencode-go",
+  "counts_as_result": false,
+  "confirmed": 0,
+  "false_positives": 0,
+  "unclassified": 0,
+  "tokens": null,
+  "cost_usd": null,
+  "cost_per_confirmed": null,
+  "blocked_reason": "no working OpenCode Go credential",
+  "run_dir": "/home/pcbuy/src/ocgo/evals/results/opencode-idor-app-20261010-131251"
+}

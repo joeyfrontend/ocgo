@@ -1,0 +1,14 @@
+{
+  "harness": "bridge",
+  "target": "idor-app",
+  "upstream": "mock",
+  "counts_as_result": false,
+  "confirmed": 1,
+  "false_positives": 0,
+  "unclassified": 0,
+  "tokens": null,
+  "cost_usd": null,
+  "cost_per_confirmed": null,
+  "blocked_reason": "scripted upstream: exercises the harness, does not measure a model",
+  "run_dir": "/home/pcbuy/src/ocgo/evals/results/bridge-idor-app-20261010-131218"
+}

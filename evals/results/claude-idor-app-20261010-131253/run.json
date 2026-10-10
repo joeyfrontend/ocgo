@@ -1,0 +1,7 @@
+{
+  "harness": "claude",
+  "upstream": "opencode-go",
+  "harness_exit": 3,
+  "counts_as_result": false,
+  "blocked_reason": "no working OpenCode Go credential"
+}
