@@ -4,7 +4,7 @@
  "input": [
   {
    "type": "message",
-   "id": "msg_5beadf88-9794-514d-98fe-d4edb96ab429",
+   "id": "msg_53a537b1-d61e-55d0-aba4-da9dc32d4c9f",
    "role": "developer",
    "content": [
     {
@@ -15,7 +15,7 @@
   },
   {
    "type": "message",
-   "id": "msg_01a12591-d1d8-7822-a6a6-621f87bd91f0",
+   "id": "msg_01a1259f-7fc5-7a30-b010-9e4c8c377769",
    "role": "developer",
    "content": [
     {
@@ -24,24 +24,24 @@
     },
     {
      "type": "input_text",
-     "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n The writable roots are `/work/repo`, `/tmp`.\n</permissions instructions>"
+     "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is restricted.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n The writable roots are `/home/pcbuy/ocgo-capture2/repo`, `/tmp`.\n</permissions instructions>"
     }
    ]
   },
   {
    "type": "message",
-   "id": "msg_01a12591-d1d8-7822-a6a6-62206dc642b0",
+   "id": "msg_01a1259f-7fc5-7a30-b010-9e581974ef44",
    "role": "user",
    "content": [
     {
      "type": "input_text",
-     "text": "<environment_context>\n  <cwd>/work/repo</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-10</current_date>\n  <timezone>Africa/Algiers</timezone>\n  <filesystem><workspace_roots><root>/work/repo</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry><entry access=\"write\"><path>/work/repo</path></entry><entry access=\"write\"><special>:slash_tmp</special></entry><entry access=\"write\"><special>:tmpdir</special></entry><entry access=\"read\"><path>/work/repo/.git</path></entry><entry access=\"read\"><path>/work/repo/.agents</path></entry><entry access=\"read\"><path>/work/repo/.codex</path></entry><entry access=\"read\"><path>/work/repo/.aws</path></entry></file_system></permission_profile></filesystem>\n</environment_context>"
+     "text": "<environment_context>\n  <cwd>/home/pcbuy/ocgo-capture2/repo</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-10</current_date>\n  <timezone>Africa/Algiers</timezone>\n  <filesystem><workspace_roots><root>/home/pcbuy/ocgo-capture2/repo</root></workspace_roots><permission_profile type=\"managed\"><file_system type=\"restricted\"><entry access=\"read\"><special>:root</special></entry><entry access=\"write\"><path>/home/pcbuy/ocgo-capture2/repo</path></entry><entry access=\"write\"><special>:slash_tmp</special></entry><entry access=\"write\"><special>:tmpdir</special></entry><entry access=\"read\"><path>/home/pcbuy/ocgo-capture2/repo/.git</path></entry><entry access=\"read\"><path>/home/pcbuy/ocgo-capture2/repo/.agents</path></entry><entry access=\"read\"><path>/home/pcbuy/ocgo-capture2/repo/.codex</path></entry><entry access=\"read\"><path>/home/pcbuy/ocgo-capture2/repo/.aws</path></entry></file_system></permission_profile></filesystem>\n</environment_context>"
     }
    ]
   },
   {
    "type": "message",
-   "id": "msg_01a12591-d1ea-7bd1-9db5-012987edadfc",
+   "id": "msg_01a1259f-7fd7-7a30-a535-d2198b59906a",
    "role": "user",
    "content": [
     {
@@ -498,12 +498,12 @@
  ],
  "prompt_cache_key": "11111111-1111-4111-8111-111111111111",
  "client_metadata": {
+  "x-codex-window-id": "11111111-1111-4111-8111-111111111111:0",
   "session_id": "11111111-1111-4111-8111-111111111111",
-  "x-codex-turn-metadata": "{\"installation_id\":\"22222222-2222-4222-8222-222222222222\",\"session_id\":\"11111111-1111-4111-8111-111111111111\",\"thread_id\":\"11111111-1111-4111-8111-111111111111\",\"agent_name\":\"/root\",\"turn_id\":\"33333333-3333-4333-8333-333333333333\",\"window_id\":\"11111111-1111-4111-8111-111111111111:0\",\"window_number\":0,\"context_window_id\":\"44444444-4444-4444-8444-444444444444\",\"request_kind\":\"turn\",\"root_turn_id\":\"33333333-3333-4333-8333-333333333333\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seccomp\",\"sandbox_mode\":\"workspace-write\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"workspaces\":{\"/work/repo\":{\"latest_git_commit_hash\":\"a0c900725e96fabcc81b7f60fe00fbd1402c04b2\",\"has_changes\":false}},\"turn_started_at_unix_ms\":1791631675820,\"analytics_enabled\":true,\"model\":\"glm-5.3-flash\",\"reasoning_effort\":\"minimal\"}",
+  "x-codex-turn-metadata": "{\"installation_id\":\"22222222-2222-4222-8222-222222222222\",\"session_id\":\"11111111-1111-4111-8111-111111111111\",\"thread_id\":\"11111111-1111-4111-8111-111111111111\",\"agent_name\":\"/root\",\"turn_id\":\"33333333-3333-4333-8333-333333333333\",\"window_id\":\"11111111-1111-4111-8111-111111111111:0\",\"window_number\":0,\"context_window_id\":\"44444444-4444-4444-8444-444444444444\",\"request_kind\":\"turn\",\"root_turn_id\":\"33333333-3333-4333-8333-333333333333\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seccomp\",\"sandbox_mode\":\"workspace-write\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":false,\"node_repl_disabled\":false,\"workspaces\":{\"/home/pcbuy/ocgo-capture2/repo\":{\"latest_git_commit_hash\":\"1cecd4db782f0566888b269feab7971250a997c1\",\"has_changes\":false}},\"turn_started_at_unix_ms\":1791632572312,\"analytics_enabled\":true,\"model\":\"glm-5.3-flash\",\"reasoning_effort\":\"minimal\"}",
+  "root_turn_id": "33333333-3333-4333-8333-333333333333",
   "x-codex-installation-id": "00000000-0000-4000-8000-000000000000",
   "turn_id": "33333333-3333-4333-8333-333333333333",
-  "thread_id": "11111111-1111-4111-8111-111111111111",
-  "x-codex-window-id": "11111111-1111-4111-8111-111111111111:0",
-  "root_turn_id": "33333333-3333-4333-8333-333333333333"
+  "thread_id": "11111111-1111-4111-8111-111111111111"
  }
 }

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"ocgo/internal/responses"
 	"ocgo/internal/session"
 	"ocgo/internal/trace"
 )
@@ -183,36 +184,6 @@ type OAIRequest struct {
 
 type OAIStreamOptions struct {
 	IncludeUsage bool `json:"include_usage"`
-}
-
-type ResponsesRequest struct {
-	Model              string          `json:"model"`
-	Input              json.RawMessage `json:"input"`
-	Instructions       string          `json:"instructions,omitempty"`
-	Stream             bool            `json:"stream,omitempty"`
-	MaxTokens          int             `json:"max_output_tokens,omitempty"`
-	Temperature        *float64        `json:"temperature,omitempty"`
-	TopP               *float64        `json:"top_p,omitempty"`
-	Tools              []ResponseTool  `json:"tools,omitempty"`
-	Thinking           json.RawMessage `json:"thinking,omitempty"`
-	Reasoning          json.RawMessage `json:"reasoning,omitempty"`
-	ReasoningEffort    json.RawMessage `json:"reasoning_effort,omitempty"`
-	Effort             json.RawMessage `json:"effort,omitempty"`
-	Level              json.RawMessage `json:"level,omitempty"`
-	Depth              json.RawMessage `json:"depth,omitempty"`
-	OutputConfig       json.RawMessage `json:"output_config,omitempty"`
-	PromptCacheKey     string          `json:"prompt_cache_key,omitempty"`
-	Store              *bool           `json:"store,omitempty"`
-	PreviousResponseID string          `json:"previous_response_id,omitempty"`
-}
-
-type ResponseTool struct {
-	Type              string          `json:"type"`
-	Name              string          `json:"name,omitempty"`
-	Description       string          `json:"description,omitempty"`
-	Parameters        json.RawMessage `json:"parameters,omitempty"`
-	SearchContextSize string          `json:"search_context_size,omitempty"`
-	UserLocation      json.RawMessage `json:"user_location,omitempty"`
 }
 
 type OAIMessage struct {
@@ -909,11 +880,15 @@ func statusCmd() *cobra.Command {
 }
 
 // proxy holds the per-server state shared by every request: configuration, the
-// optional trace writer and the conversation-to-session resolver.
+// optional trace writer, the conversation-to-session resolver and the set of
+// warnings already reported.
 type proxy struct {
 	cfg     Config
 	trace   *trace.Writer
 	session *session.Resolver
+
+	mu     sync.Mutex
+	warned map[string]bool
 }
 
 func newProxy(cfg Config) (*proxy, error) {
@@ -921,7 +896,21 @@ func newProxy(cfg Config) (*proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &proxy{cfg: cfg, trace: tw, session: session.NewResolver()}, nil
+	return &proxy{cfg: cfg, trace: tw, session: session.NewResolver(), warned: map[string]bool{}}, nil
+}
+
+// warnOnce records a translation warning at most once per conversation, so a
+// tool that is dropped on every turn does not bury the trace.
+func (p *proxy) warnOnce(conv, msg string) {
+	key := conv + "\x00" + msg
+	p.mu.Lock()
+	if p.warned[key] {
+		p.mu.Unlock()
+		return
+	}
+	p.warned[key] = true
+	p.mu.Unlock()
+	p.trace.Log(conv, trace.KindNote, trace.Record{Text: "translation: " + msg})
 }
 
 func (p *proxy) close() error { return p.trace.Close() }
@@ -1105,9 +1094,9 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request", http.StatusBadRequest)
 		return
 	}
-	var rr ResponsesRequest
-	if err := json.Unmarshal(raw, &rr); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+	rr, err := responses.Decode(raw)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -1118,7 +1107,14 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	p.trace.LogHeaders(conv, trace.KindInbound, r.Method, r.URL.Path, r.Header, raw)
 	p.trace.Log(conv, trace.KindNote, trace.Record{Text: fmt.Sprintf("session id %q (native header %q)", sessionID, nativeHeader)})
 
-	or := responsesToChat(rr)
+	chat := rr.ToChat()
+	chat.Model = resolveToolModel("codex", rr.Model)
+	chat.ReasoningEffort = downstreamReasoningEffort(rr.Reasoning, rr.Thinking, rr.OutputConfig, rr.ReasoningEffort, rr.Effort, rr.Level, rr.Depth)
+	for _, warning := range chat.Warnings {
+		p.warnOnce(conv, warning)
+	}
+
+	or := chatToOAI(chat)
 	if err := validateImageSupport(or); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1127,6 +1123,13 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	if p.trace != nil {
 		out = &traceWriter{w: w, trace: p.trace, conv: conv}
 	}
+	translator := responses.TranslatorOptions{
+		Writer:           out,
+		Model:            or.Model,
+		ReasoningSummary: reasoningSummaryEnabled(),
+		Warn:             func(msg string) { p.warnOnce(conv, msg) },
+	}
+
 	if modelUsesAnthropicEndpoint(or.Model) {
 		or.Model = modelID(or.Model)
 		resp, err := forwardAnthropic(r.Context(), p.cfg, chatToAnthropic(or))
@@ -1147,7 +1150,12 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 		writeResponsesResponseFromAnthropic(w, resp.Body, or.Model)
 		return
 	}
-	body, _ := json.Marshal(or)
+
+	body, err := json.Marshal(chat)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	url := p.upstreamURL()
 	req, err := p.newUpstreamRequest(r.Context(), url, body, sessionID)
 	if err != nil {
@@ -1164,9 +1172,19 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(resp.Body)
-		p.trace.Log(conv, trace.KindError, trace.Record{Text: fmt.Sprintf("upstream status %d: %s", resp.StatusCode, firstN(string(errBody), 2000))})
+		code := fmt.Sprintf("upstream_%d", resp.StatusCode)
+		message := firstN(strings.TrimSpace(string(errBody)), 2000)
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: fmt.Sprintf("upstream status %d: %s", resp.StatusCode, message)})
+		if rr.Stream {
+			// A failure after the client has committed to SSE must arrive as a
+			// response.failed event; a changed HTTP status is no longer visible.
+			w.Header().Set("Content-Type", "text/event-stream")
+			_ = responses.NewStreamTranslator(translator).Fail(code, message)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(errBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": code, "message": message}})
 		return
 	}
 	stream := io.Reader(resp.Body)
@@ -1175,11 +1193,92 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	if rr.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
-		streamResponses(out, stream, or.Model)
+		if _, err := responses.TranslateStream(out, stream, translator); err != nil {
+			p.trace.Log(conv, trace.KindError, trace.Record{Text: "stream translation: " + err.Error()})
+		}
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	writeResponsesResponse(out, stream, or.Model)
+	if _, err := responses.TranslateResponse(out, stream, translator); err != nil {
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: "response translation: " + err.Error()})
+		http.Error(w, err.Error(), http.StatusBadGateway)
+	}
+}
+
+// reasoningSummaryEnabled reports whether reasoning items should be emitted.
+// Codex only renders them when the model catalog advertises reasoning
+// summaries, so this is off unless explicitly requested.
+func reasoningSummaryEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OCGO_REASONING_SUMMARY"))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+// chatToOAI adapts a translated chat request onto ocgo's internal request type,
+// which the Anthropic-endpoint branch and the image checks operate on.
+func chatToOAI(c responses.ChatRequest) OAIRequest {
+	out := OAIRequest{
+		Model:           c.Model,
+		Stream:          c.Stream,
+		MaxTokens:       c.MaxTokens,
+		Temperature:     c.Temperature,
+		TopP:            c.TopP,
+		ReasoningEffort: c.ReasoningEffort,
+	}
+	if c.StreamOptions != nil {
+		out.StreamOptions = &OAIStreamOptions{IncludeUsage: c.StreamOptions.IncludeUsage}
+	}
+	for _, m := range c.Messages {
+		msg := OAIMessage{
+			Role:             m.Role,
+			Content:          m.Content,
+			ToolCallID:       m.ToolCallID,
+			ReasoningContent: m.ReasoningContent,
+		}
+		for _, call := range m.ToolCalls {
+			msg.ToolCalls = append(msg.ToolCalls, OAIToolCall{
+				ID:   call.ID,
+				Type: call.Type,
+				Function: OAICallFunction{
+					Name:      call.Function.Name,
+					Arguments: call.Function.Arguments,
+				},
+			})
+		}
+		out.Messages = append(out.Messages, msg)
+	}
+	for _, t := range c.Tools {
+		out.Tools = append(out.Tools, OAITool{
+			Type: t.Type,
+			Function: OAIFunction{
+				Name:        t.Function.Name,
+				Description: t.Function.Description,
+				Parameters:  t.Function.Parameters,
+			},
+		})
+	}
+	for _, kind := range c.BuiltinTools {
+		if tool, ok := hostedToolToAnthropic(kind); ok {
+			out.AnthropicTools = appendUniqueAnthropicTool(out.AnthropicTools, tool)
+		}
+	}
+	return out
+}
+
+// hostedToolToAnthropic maps a hosted tool kind onto the Anthropic tool that
+// serves it, for models reached over the Anthropic wire format.
+func hostedToolToAnthropic(kind string) (ATool, bool) {
+	switch kind {
+	case "web_search":
+		return ATool{Type: "web_search_20250305", Name: "web_search"}, true
+	case "web_fetch":
+		return ATool{Type: "web_fetch_20250910", Name: "web_fetch"}, true
+	default:
+		return ATool{}, false
+	}
 }
 
 // traceWriter records each outbound event block as it is written downstream.
@@ -1192,6 +1291,14 @@ type traceWriter struct {
 func (t *traceWriter) Write(b []byte) (int, error) {
 	t.trace.Log(t.conv, trace.KindEvent, trace.Record{Text: strings.TrimRight(string(b), "\n")})
 	return t.w.Write(b)
+}
+
+// Flush forwards to the wrapped writer so wrapping for tracing does not
+// silently disable streaming.
+func (t *traceWriter) Flush() {
+	if f, ok := t.w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // traceReader records the upstream stream one SSE line at a time.
@@ -1680,37 +1787,6 @@ func convertRequest(ar AnthropicRequest) OAIRequest {
 	return out
 }
 
-func responsesToChat(rr ResponsesRequest) OAIRequest {
-	model := resolveToolModel("codex", rr.Model)
-	out := OAIRequest{Model: model, Stream: rr.Stream, StreamOptions: streamUsageOptions(rr.Stream), MaxTokens: rr.MaxTokens, Temperature: rr.Temperature, TopP: rr.TopP, ReasoningEffort: downstreamReasoningEffort(rr.Reasoning, rr.Thinking, rr.OutputConfig, rr.ReasoningEffort, rr.Effort, rr.Level, rr.Depth)}
-	if rr.Instructions != "" {
-		out.Messages = append(out.Messages, OAIMessage{Role: "system", Content: rr.Instructions})
-	}
-	out.Messages = append(out.Messages, sanitizeOAIToolMessages(responsesInputToMessages(rr.Input))...)
-	for _, t := range rr.Tools {
-		if tool, ok := responseBuiltinToolToAnthropic(t); ok {
-			out.AnthropicTools = appendUniqueAnthropicTool(out.AnthropicTools, tool)
-			continue
-		}
-		if strings.TrimSpace(t.Name) != "" && (t.Type == "" || t.Type == "function") {
-			out.Tools = append(out.Tools, OAITool{Type: "function", Function: OAIFunction{Name: t.Name, Description: t.Description, Parameters: toolParametersOrDefault(t.Parameters)}})
-		}
-	}
-	return out
-}
-
-func responseBuiltinToolToAnthropic(t ResponseTool) (ATool, bool) {
-	switch strings.ToLower(strings.TrimSpace(t.Type)) {
-	case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
-		tool := ATool{Type: "web_search_20250305", Name: "web_search", UserLocation: t.UserLocation}
-		return tool, true
-	case "web_fetch", "web_extractor":
-		return ATool{Type: "web_fetch_20250910", Name: "web_fetch"}, true
-	default:
-		return ATool{}, false
-	}
-}
-
 func appendUniqueAnthropicTool(tools []ATool, tool ATool) []ATool {
 	for _, existing := range tools {
 		if existing.Type == tool.Type && existing.Name == tool.Name {
@@ -1949,121 +2025,11 @@ func contentHasImage(content any) bool {
 	return false
 }
 
-func responsesInputToMessages(raw json.RawMessage) []OAIMessage {
-	if len(raw) == 0 {
-		return nil
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return []OAIMessage{{Role: "user", Content: s}}
-	}
-	var items []map[string]json.RawMessage
-	if json.Unmarshal(raw, &items) != nil {
-		return []OAIMessage{{Role: "user", Content: string(raw)}}
-	}
-	var out []OAIMessage
-	var pendingCalls []OAIToolCall
-	for _, item := range items {
-		var typ, role string
-		_ = json.Unmarshal(item["type"], &typ)
-		_ = json.Unmarshal(item["role"], &role)
-		switch typ {
-		case "message", "":
-			if role == "developer" {
-				role = "system"
-			}
-			if role == "" {
-				role = "user"
-			}
-			out = append(out, OAIMessage{Role: role, Content: responsesContent(item["content"])})
-		case "function_call":
-			var id, callID, name, args string
-			_ = json.Unmarshal(item["id"], &id)
-			_ = json.Unmarshal(item["call_id"], &callID)
-			_ = json.Unmarshal(item["name"], &name)
-			_ = json.Unmarshal(item["arguments"], &args)
-			if callID == "" {
-				callID = id
-			}
-			pendingCalls = append(pendingCalls, OAIToolCall{ID: callID, Type: "function", Function: OAICallFunction{Name: name, Arguments: args}})
-		case "function_call_output":
-			if len(pendingCalls) > 0 {
-				out = append(out, assistantToolCallsMessage(pendingCalls))
-				pendingCalls = nil
-			}
-			var callID string
-			_ = json.Unmarshal(item["call_id"], &callID)
-			out = append(out, OAIMessage{Role: "tool", ToolCallID: callID, Content: responsesContentText(item["output"])})
-		}
-	}
-	if len(pendingCalls) > 0 {
-		out = append(out, assistantToolCallsMessage(pendingCalls))
-	}
-	return out
-}
-
 func assistantToolCallsMessage(calls []OAIToolCall) OAIMessage {
 	return OAIMessage{Role: "assistant", ToolCalls: calls, ReasoningContent: cachedReasoningContent(calls)}
 }
 
 const unavailableToolResultContent = "Tool result unavailable."
-
-// sanitizeOAIToolMessages enforces the OpenAI-compatible invariant that an
-// assistant message with tool_calls is immediately followed by tool messages
-// for those exact call IDs. It drops orphan/late tool messages and inserts a
-// conservative placeholder for any missing result.
-func sanitizeOAIToolMessages(messages []OAIMessage) []OAIMessage {
-	if len(messages) == 0 {
-		return messages
-	}
-	out := make([]OAIMessage, 0, len(messages))
-	for i := 0; i < len(messages); {
-		m := messages[i]
-		if m.Role == "tool" {
-			// A tool message that is not consumed immediately after an assistant
-			// tool_calls message is orphaned or late and must not be forwarded.
-			i++
-			continue
-		}
-		out = append(out, m)
-		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
-			i++
-			continue
-		}
-
-		expected := toolCallIDOrder(m.ToolCalls)
-		seen := map[string]bool{}
-		j := i + 1
-		for j < len(messages) && messages[j].Role == "tool" {
-			toolMsg := messages[j]
-			if containsString(expected, toolMsg.ToolCallID) && !seen[toolMsg.ToolCallID] {
-				out = append(out, toolMsg)
-				seen[toolMsg.ToolCallID] = true
-			}
-			j++
-		}
-		for _, id := range expected {
-			if !seen[id] {
-				out = append(out, OAIMessage{Role: "tool", ToolCallID: id, Content: unavailableToolResultContent})
-			}
-		}
-		i = j
-	}
-	return out
-}
-
-func toolCallIDOrder(calls []OAIToolCall) []string {
-	ids := make([]string, 0, len(calls))
-	seen := map[string]bool{}
-	for _, call := range calls {
-		id := strings.TrimSpace(call.ID)
-		if id != "" && !seen[id] {
-			ids = append(ids, id)
-			seen[id] = true
-		}
-	}
-	return ids
-}
 
 func containsString(values []string, want string) bool {
 	for _, value := range values {
@@ -2210,66 +2176,6 @@ func cacheReasoningContent(calls []OAIToolCall, reasoning string) {
 			reasoningContentCache.byCallID[call.ID] = reasoning
 		}
 	}
-}
-
-func responsesContent(raw json.RawMessage) any {
-	if len(raw) == 0 {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	var parts []map[string]json.RawMessage
-	if json.Unmarshal(raw, &parts) != nil {
-		return string(raw)
-	}
-	var text strings.Builder
-	var out []OAIContentPart
-	hasImage := false
-	for _, p := range parts {
-		var typ string
-		_ = json.Unmarshal(p["type"], &typ)
-		switch typ {
-		case "input_text", "output_text", "text":
-			for _, key := range []string{"text", "output_text"} {
-				var v string
-				if json.Unmarshal(p[key], &v) == nil {
-					text.WriteString(v)
-					out = append(out, OAIContentPart{Type: "text", Text: v})
-					break
-				}
-			}
-		case "input_image", "image_url":
-			if image := responsesImageURL(p); image != nil {
-				hasImage = true
-				out = append(out, OAIContentPart{Type: "image_url", ImageURL: image})
-			}
-		}
-	}
-	if hasImage {
-		return out
-	}
-	return text.String()
-}
-
-func responsesImageURL(p map[string]json.RawMessage) *OAIImageURL {
-	var url string
-	if json.Unmarshal(p["image_url"], &url) != nil {
-		var obj struct {
-			URL string `json:"url"`
-		}
-		if json.Unmarshal(p["image_url"], &obj) == nil {
-			url = obj.URL
-		}
-	}
-	if url == "" {
-		_ = json.Unmarshal(p["url"], &url)
-	}
-	if url == "" {
-		return nil
-	}
-	return &OAIImageURL{URL: url}
 }
 
 func responsesContentText(raw json.RawMessage) string {
@@ -2968,106 +2874,6 @@ func readSSE(body io.Reader, handle func(event string, data []byte) bool) {
 	_ = flush()
 }
 
-func streamResponses(w io.Writer, body io.Reader, model string) {
-	flusher, _ := w.(http.Flusher)
-	id := "resp_ocgo"
-	writeResponseEvent(w, "response.created", map[string]any{"type": "response.created", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "in_progress", "output": []any{}}})
-	if flusher != nil {
-		flusher.Flush()
-	}
-	messageStarted := false
-	messageDone := false
-	messageOutputIndex := -1
-	nextOutputIndex := 0
-	var text strings.Builder
-	var reasoning strings.Builder
-	usage := tokenUsage{}
-	toolIndexes := map[int]int{}
-	var tools []streamedResponseToolCall
-	s := bufio.NewScanner(body)
-	for s.Scan() {
-		line := strings.TrimSpace(s.Text())
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if data == "[DONE]" {
-			break
-		}
-		chunk := parseOpenAIStreamChunk([]byte(data))
-		if chunk.Usage.Present {
-			usage = chunk.Usage
-		}
-		if chunk.ReasoningContent != "" {
-			reasoning.WriteString(chunk.ReasoningContent)
-		}
-		if chunk.Content != "" {
-			if !messageStarted {
-				messageStarted = true
-				messageOutputIndex = nextOutputIndex
-				nextOutputIndex++
-				writeResponseEvent(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": messageOutputIndex, "item": map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []any{}}})
-				writeResponseEvent(w, "response.content_part.added", map[string]any{"type": "response.content_part.added", "item_id": "msg_ocgo", "output_index": messageOutputIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "text": ""}})
-			}
-			text.WriteString(chunk.Content)
-			writeResponseEvent(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "item_id": "msg_ocgo", "output_index": messageOutputIndex, "content_index": 0, "delta": chunk.Content})
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		for _, tc := range chunk.ToolCalls {
-			toolPos, ok := toolIndexes[tc.Index]
-			if !ok {
-				callID := tc.ID
-				if callID == "" {
-					callID = fmt.Sprintf("call_%d", tc.Index)
-				}
-				toolPos = len(tools)
-				toolIndexes[tc.Index] = toolPos
-				outputIndex := nextOutputIndex
-				nextOutputIndex++
-				tools = append(tools, streamedResponseToolCall{OutputIndex: outputIndex, Call: OAIToolCall{ID: callID, Type: "function", Function: OAICallFunction{Name: tc.Name}}})
-				writeResponseEvent(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": outputIndex, "item": map[string]any{"id": callID, "type": "function_call", "call_id": callID, "name": tc.Name, "arguments": ""}})
-			}
-			if tc.ID != "" {
-				tools[toolPos].Call.ID = tc.ID
-			}
-			if tc.Name != "" {
-				tools[toolPos].Call.Function.Name = tc.Name
-			}
-			if tc.Arguments != "" {
-				tools[toolPos].Call.Function.Arguments += tc.Arguments
-				writeResponseEvent(w, "response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "item_id": tools[toolPos].Call.ID, "output_index": tools[toolPos].OutputIndex, "delta": tc.Arguments})
-			}
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-	}
-	var toolCalls []OAIToolCall
-	for _, tool := range tools {
-		toolCalls = append(toolCalls, tool.Call)
-	}
-	cacheReasoningContent(toolCalls, reasoning.String())
-	if messageStarted && !messageDone {
-		messageDone = true
-		writeResponseEvent(w, "response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": "msg_ocgo", "output_index": messageOutputIndex, "content_index": 0, "text": text.String()})
-		writeResponseEvent(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": messageOutputIndex, "item": map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text.String()}}}})
-	}
-	var output []any
-	if messageStarted {
-		output = append(output, map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text.String()}}})
-	}
-	for _, tool := range tools {
-		call := tool.Call
-		item := map[string]any{"id": call.ID, "type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments}
-		writeResponseEvent(w, "response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "item_id": call.ID, "output_index": tool.OutputIndex, "arguments": call.Function.Arguments})
-		writeResponseEvent(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": tool.OutputIndex, "item": item})
-		output = append(output, item)
-	}
-	writeResponseEvent(w, "response.completed", map[string]any{"type": "response.completed", "response": map[string]any{"id": id, "object": "response", "model": model, "status": "completed", "output": output, "usage": responsesUsage(usage)}})
-}
-
 type streamedResponseToolCall struct {
 	OutputIndex int
 	Call        OAIToolCall
@@ -3122,35 +2928,6 @@ func parseOpenAIStreamChunk(data []byte) openAIStreamChunk {
 func writeResponseEvent(w io.Writer, event string, payload any) {
 	b, _ := json.Marshal(payload)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-}
-
-func writeResponsesResponse(w io.Writer, body io.Reader, model string) {
-	var v struct {
-		Choices []struct {
-			Message struct {
-				Content          string        `json:"content"`
-				ReasoningContent string        `json:"reasoning_content"`
-				ToolCalls        []OAIToolCall `json:"tool_calls"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage json.RawMessage `json:"usage"`
-	}
-	_ = json.NewDecoder(body).Decode(&v)
-	text := ""
-	var output []any
-	if len(v.Choices) > 0 {
-		text = v.Choices[0].Message.Content
-		if len(v.Choices[0].Message.ToolCalls) > 0 {
-			cacheReasoningContent(v.Choices[0].Message.ToolCalls, v.Choices[0].Message.ReasoningContent)
-			for _, call := range v.Choices[0].Message.ToolCalls {
-				output = append(output, map[string]any{"id": call.ID, "type": "function_call", "call_id": call.ID, "name": call.Function.Name, "arguments": call.Function.Arguments})
-			}
-		}
-	}
-	if len(output) == 0 {
-		output = append(output, map[string]any{"id": "msg_ocgo", "type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": text}}})
-	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp_ocgo", "object": "response", "created_at": time.Now().Unix(), "model": model, "status": "completed", "output": output, "usage": responsesUsage(usageFromJSON(v.Usage))})
 }
 
 func countTokens(w http.ResponseWriter, r *http.Request) {

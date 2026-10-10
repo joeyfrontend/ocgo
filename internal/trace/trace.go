@@ -207,10 +207,20 @@ func (w *Writer) scrubJSON(b json.RawMessage) json.RawMessage {
 	return json.RawMessage(w.scrubText(string(b)))
 }
 
-var unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+var (
+	unsafeName = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+	dotRuns    = regexp.MustCompile(`\.{2,}`)
+)
 
+// safeName turns a client-supplied conversation id into a file name that
+// cannot traverse out of the trace directory.
 func safeName(s string) string {
 	s = unsafeName.ReplaceAllString(s, "_")
+	s = dotRuns.ReplaceAllString(s, ".")
+	s = strings.TrimLeft(s, ".")
+	if s == "" {
+		s = "unknown"
+	}
 	if len(s) > 96 {
 		s = s[:96]
 	}

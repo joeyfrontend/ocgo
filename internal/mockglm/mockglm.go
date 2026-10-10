@@ -241,7 +241,7 @@ func (s *Server) completeBody(model string, t Turn) map[string]any {
 	return map[string]any{
 		"id": "chatcmpl-mock", "object": "chat.completion", "model": model,
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": finish}},
-		"usage": s.usageMap(),
+		"usage":   s.usageMap(),
 	}
 }
 
