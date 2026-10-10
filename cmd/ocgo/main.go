@@ -31,7 +31,7 @@ const (
 	appName                            = "ocgo"
 	defaultHost                        = "127.0.0.1"
 	defaultPort                        = 3456
-	openAIURL                          = "https://opencode.ai/zen/go/v1/chat/completions"
+	defaultBaseURL                     = "https://opencode.ai/inference/go"
 	codexProfileName                   = "ocgo-launch"
 	userAgentPrefix                    = "ocgo-hunt7"
 	maxAnthropicToolResultContentChars = 120000
@@ -40,12 +40,35 @@ const (
 
 var version = "dev"
 
-var anthropicURL = "https://opencode.ai/zen/go/v1/messages"
-
 const (
-	remoteModelsURL   = "https://models.dev/api.json"
+	remoteModelsURL = "https://models.dev/api.json"
+	// officialModelsURL still answers on the older path: the model listing has
+	// not moved even though inference has.
 	officialModelsURL = "https://opencode.ai/zen/go/v1/models"
 )
+
+// apiBaseURL is the host and prefix every inference call is built from. It is
+// overridable because this endpoint has already moved once: it was
+// https://opencode.ai/zen/go, which now rejects session-token credentials with
+// 401 Invalid API key.
+func apiBaseURL(cfg Config) string {
+	if u := strings.TrimSpace(cfg.BaseURL); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	if u := strings.TrimSpace(os.Getenv("OCGO_BASE_URL")); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	return defaultBaseURL
+}
+
+// chatCompletionsURL is the OpenAI-shaped inference endpoint.
+func chatCompletionsURL(cfg Config) string {
+	return apiBaseURL(cfg) + "/openai/v1/chat/completions"
+}
+
+// messagesURL is the Anthropic-shaped inference endpoint, used for the models
+// that only speak that protocol.
+func messagesURL(cfg Config) string { return apiBaseURL(cfg) + "/anthropic/v1/messages" }
 
 // officialModelsResponse matches the OpenCode Go /v1/models response shape.
 type officialModelsResponse struct {
@@ -129,6 +152,13 @@ type Config struct {
 	APIKey string `json:"api_key"`
 	Host   string `json:"host"`
 	Port   int    `json:"port"`
+	// OrgID is the workspace the credential belongs to. The inference endpoint
+	// refuses a request without it: 403 "Workspace selection is required".
+	OrgID string `json:"org_id,omitempty"`
+	// BaseURL overrides the inference host and prefix. It is stored because the
+	// endpoint has already moved once, and a moved endpoint should not require
+	// a new release to follow.
+	BaseURL string `json:"base_url,omitempty"`
 
 	// TraceDir records every conversation as JSONL. Empty disables tracing.
 	TraceDir string `json:"-"`
@@ -244,6 +274,8 @@ func main() {
 
 func setupCmd() *cobra.Command {
 	var key string
+	var org string
+	var base string
 	cmd := &cobra.Command{
 		Use:   "setup",
 		Short: "Save your OpenCode Go API key",
@@ -259,14 +291,29 @@ func setupCmd() *cobra.Command {
 				}
 				key = line
 			}
-			cfg := Config{APIKey: strings.TrimSpace(key), Host: defaultHost, Port: defaultPort}
+			if strings.TrimSpace(org) == "" {
+				org = os.Getenv("OCGO_ORG_ID")
+			}
+			cfg := Config{
+				APIKey:  strings.TrimSpace(key),
+				OrgID:   strings.TrimSpace(org),
+				BaseURL: strings.TrimSpace(base),
+				Host:    defaultHost,
+				Port:    defaultPort,
+			}
 			if cfg.APIKey == "" {
 				return errors.New("API key cannot be empty")
+			}
+			if cfg.OrgID == "" {
+				fmt.Println("Warning: no workspace id set. The inference endpoint answers")
+				fmt.Println("403 \"Workspace selection is required\" without one; pass --org-id.")
 			}
 			return saveConfig(cfg)
 		},
 	}
 	cmd.Flags().StringVar(&key, "api-key", "", "OpenCode Go API key")
+	cmd.Flags().StringVar(&org, "org-id", "", "OpenCode Go workspace id, e.g. wrk_...")
+	cmd.Flags().StringVar(&base, "base-url", "", "Override the inference base URL")
 	return cmd
 }
 
@@ -1001,7 +1048,7 @@ func (p *proxy) upstreamURL() string {
 	if u := strings.TrimSpace(p.cfg.Upstream); u != "" {
 		return u
 	}
-	return openAIURL
+	return chatCompletionsURL(p.cfg)
 }
 
 func ocgoUserAgent() string { return userAgentPrefix + "/" + version + " (codex)" }
@@ -1014,10 +1061,26 @@ func (p *proxy) newUpstreamRequest(ctx context.Context, url string, body []byte,
 	req.Header.Set("Authorization", "Bearer "+p.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", ocgoUserAgent())
+	applyWorkspaceHeaders(req.Header, p.cfg)
 	if sessionID != "" {
 		req.Header.Set("x-opencode-session", sessionID)
 	}
 	return req, nil
+}
+
+// applyWorkspaceHeaders sets the headers the inference endpoint requires in
+// addition to the credential. Measured against the live endpoint:
+//
+//	no x-opencode-session            -> 400 MissingSessionID
+//	session but no x-opencode-org-id -> 403 "Workspace selection is required"
+//	both                             -> 200
+//
+// The session header is set per conversation by the caller; this sets the
+// workspace, which is a property of the account rather than of the request.
+func applyWorkspaceHeaders(h http.Header, cfg Config) {
+	if org := strings.TrimSpace(cfg.OrgID); org != "" {
+		h.Set("x-opencode-org-id", org)
+	}
 }
 
 func runServer(cfg Config) error {
@@ -1083,7 +1146,7 @@ func proxyMessages(w http.ResponseWriter, r *http.Request, cfg Config) {
 		return
 	}
 	body, _ := json.Marshal(or)
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, openAIURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, chatCompletionsURL(cfg), bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1148,7 +1211,7 @@ func proxyChatCompletions(w http.ResponseWriter, r *http.Request, cfg Config) {
 		writeChatCompletionsResponseFromAnthropic(w, resp.Body, or.Model)
 		return
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, openAIURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, chatCompletionsURL(cfg), bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1484,13 +1547,15 @@ func forwardAnthropic(ctx context.Context, cfg Config, ar AnthropicRequest) (*ht
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, anthropicURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, messagesURL(cfg), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("X-API-Key", cfg.APIKey)
 	req.Header.Set("Anthropic-Version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", ocgoUserAgent())
+	applyWorkspaceHeaders(req.Header, cfg)
 	return (&http.Client{Timeout: 10 * time.Minute}).Do(req)
 }
 
@@ -3373,7 +3438,12 @@ func saveConfig(cfg Config) error {
 }
 
 func loadConfig() (Config, error) {
-	cfg := Config{Host: defaultHost, Port: defaultPort, APIKey: os.Getenv("OCGO_API_KEY")}
+	cfg := Config{
+		Host:   defaultHost,
+		Port:   defaultPort,
+		APIKey: os.Getenv("OCGO_API_KEY"),
+		OrgID:  os.Getenv("OCGO_ORG_ID"),
+	}
 	b, err := os.ReadFile(configFile())
 	if err == nil {
 		_ = json.Unmarshal(b, &cfg)

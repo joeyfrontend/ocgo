@@ -12,13 +12,17 @@ whether the bridge stays the default.
 check ownership). A finding against the control is scored as a false positive.
 
 
-Generated 2026-10-10 12:14 UTC.
+Generated 2026-10-10 13:19 UTC.
 
 ## Results
 
-**No scored runs yet.** Every harness below is blocked, so the
-comparison the plan asks for cannot be made and the bridge has no
-numbers behind it.
+| harness | target | upstream | schema conformant | confirmed | false positives | tokens | cost | cost per confirmed |
+|---|---|---|---|---|---|---|---|---|
+| bridge | idor-app | opencode-go | yes | 1 | 0 | 45700 | 0.005999 | 0.005999 |
+Schema conformance is reported next to the security result on purpose:
+a run that finds the defect but returns it wrapped in prose has
+answered the security question and failed the output contract, and
+collapsing the two would hide one of them.
 
 ## Blocked
 
@@ -38,24 +42,26 @@ findings are the ones the script asked for.
 |---|---|---|---|---|---|
 | bridge | idor-app | mock | 1 | 0 | scripted upstream: exercises the harness, does not measure a model |
 
-## How to unblock
+## How these were produced
 
-1. Supply a working OpenCode Go API key (`ocgo setup`). The key present
-   on this machine returns `401 Invalid API key` from
-   `https://opencode.ai/zen/go/v1/chat/completions`, across `Authorization:
-   Bearer`, bare `Authorization` and `x-api-key`, on both the Go and Zen
-   paths.
-2. Run the three harnesses against the seeded target:
+The credential is an OpenCode session token against
+`https://opencode.ai/inference/go/openai/v1`, sent with both
+`x-opencode-org-id` and `x-opencode-session`. The older
+`https://opencode.ai/zen/go` inference path rejects this credential
+with `401 Invalid API key`; only the model listing still answers there.
 
-   ```bash
-   evals/run-eval.sh bridge   idor-app
-   evals/run-eval.sh opencode idor-app
-   evals/run-eval.sh claude   idor-app
-   ```
+```bash
+evals/run-eval.sh bridge   idor-app
+evals/run-eval.sh opencode idor-app
+evals/run-eval.sh claude   idor-app
+python3 scripts/render-eval.py
+```
 
-3. Regenerate this file: `python3 scripts/render-eval.py`.
+`evals/idor-app` is a seeded local target with one deliberate IDOR on
+`/v2/orders/{id}` and a control next to it. A finding against the
+control is scored as a false positive.
 
-The owner-supplied targets the plan also calls for — one or two past
-reported findings, sanitised, and a web7 Foundry fork — are not present
-on this machine and are not invented here. Add them to
-`evals/targets.json` when they are available.
+Targets the plan also asks for — one or two past reported findings,
+sanitised, and a web7 Foundry fork — are not present on this machine
+and are not invented here. Add them to `evals/targets.json` when they
+are available.

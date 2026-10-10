@@ -102,9 +102,32 @@ case "$HARNESS" in
     else
       UPSTREAM="opencode-go"
     fi
+    # Real spend and token counts come from the bridge's own ledger, which the
+    # run's metadata otherwise has no way to see.
+    LEDGER="${OCGO_USAGE_FILE:-$HOME/.config/ocgo/usage.json}"
+    python3 - "$LEDGER" >"$OUT/ledger-before.json" <<'PY'
+import json, os, sys
+try:
+    entries = json.load(open(sys.argv[1])).get("entries", [])
+except Exception:
+    entries = []
+print(json.dumps({"count": len(entries),
+                  "cost": sum(e.get("cost", 0) for e in entries),
+                  "tokens": sum(e.get("input", 0) + e.get("output", 0) for e in entries)}))
+PY
     bash "$ROOT/scripts/hunt7-run.sh" "$OUT/scope.json" "$OUT" "$TARGET_PROMPT" \
       >"$OUT/hunt7run.log" 2>&1
     HARNESS_RC=$?
+    python3 - "$LEDGER" >"$OUT/ledger-after.json" <<'PY'
+import json, sys
+try:
+    entries = json.load(open(sys.argv[1])).get("entries", [])
+except Exception:
+    entries = []
+print(json.dumps({"count": len(entries),
+                  "cost": sum(e.get("cost", 0) for e in entries),
+                  "tokens": sum(e.get("input", 0) + e.get("output", 0) for e in entries)}))
+PY
     [ -n "$MOCK_PID" ] && kill $MOCK_PID 2>/dev/null
     [ -n "${SRV_PID:-}" ] && kill $SRV_PID 2>/dev/null
     ;;
@@ -129,14 +152,28 @@ try:
     meta = json.load(open(meta_path))
 except Exception:
     pass
+
+try:
+    before = json.load(open(f"{path}/ledger-before.json"))
+    after = json.load(open(f"{path}/ledger-after.json"))
+    if after["count"] >= before["count"]:
+        meta["cost_usd"] = round(after["cost"] - before["cost"], 8)
+        meta["tokens"] = after["tokens"] - before["tokens"]
+except Exception:
+    pass
+
 meta["harness"] = harness
 meta["upstream"] = upstream
 meta["harness_exit"] = rc
-meta["counts_as_result"] = upstream != "mock" and rc == 0
+codex_exit = meta.get("codex_exit")
+# A run counts as a result when it actually reached the model and the agent
+# finished. Schema conformance is reported separately: a correct answer in the
+# wrong wrapper is a real outcome, not a missing one.
+meta["counts_as_result"] = upstream != "mock" and codex_exit == 0
 if upstream == "mock":
-    meta["blocked_reason"] = ("scripted upstream: exercises the harness, does not measure a model")
-elif rc == 3:
-    meta["blocked_reason"] = "no working OpenCode Go credential"
+    meta["blocked_reason"] = "scripted upstream: exercises the harness, does not measure a model"
+elif codex_exit is None:
+    meta["blocked_reason"] = "the run did not complete"
 json.dump(meta, open(meta_path, "w"), indent=2)
 PY
 

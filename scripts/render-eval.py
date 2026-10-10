@@ -48,30 +48,33 @@ def main():
     lines.append("## Results")
     lines.append("")
     if real:
-        lines.append("| harness | target | upstream | confirmed | false positives | tokens | cost | cost per confirmed |")
-        lines.append("|---|---|---|---|---|---|---|---|")
+        lines.append("| harness | target | upstream | schema conformant | confirmed | false positives | tokens | cost | cost per confirmed |")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
         for r in real:
-            lines.append("| {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            lines.append("| {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 r.get("harness"), r.get("target"), r.get("upstream"),
+                yesno(r.get("schema_conformant")),
                 r.get("confirmed"), r.get("false_positives"),
                 fmt(r.get("tokens")), fmt(r.get("cost_usd")), fmt(r.get("cost_per_confirmed"))))
     else:
-        lines.append("**No scored runs yet.** Every harness below is blocked, so the")
-        lines.append("comparison the plan asks for cannot be made and the bridge has no")
-        lines.append("numbers behind it.")
+        lines.append("**No scored runs yet.** Nothing below is a measurement of a model.")
+
+    lines.append("Schema conformance is reported next to the security result on purpose:")
+    lines.append("a run that finds the defect but returns it wrapped in prose has")
+    lines.append("answered the security question and failed the output contract, and")
+    lines.append("collapsing the two would hide one of them.")
     lines.append("")
 
     lines.append("## Blocked")
     lines.append("")
-    if real:
-        lines.append("Nothing is blocked for the harnesses listed above.")
-    else:
+    if blocked:
         lines.append("| harness | target | upstream | reason |")
         lines.append("|---|---|---|---|")
-
         for r in blocked:
             lines.append("| {} | {} | {} | {} |".format(
                 r.get("harness"), r.get("target"), r.get("upstream"), r.get("blocked_reason")))
+    else:
+        lines.append("Nothing is blocked.")
     lines.append("")
 
     lines.append("## Harness smoke tests")
@@ -92,30 +95,37 @@ def main():
         lines.append("None recorded.")
     lines.append("")
 
-    lines.append("## How to unblock")
+    lines.append("## How these were produced")
     lines.append("")
-    lines.append("1. Supply a working OpenCode Go API key (`ocgo setup`). The key present")
-    lines.append("   on this machine returns `401 Invalid API key` from")
-    lines.append("   `https://opencode.ai/zen/go/v1/chat/completions`, across `Authorization:")
-    lines.append("   Bearer`, bare `Authorization` and `x-api-key`, on both the Go and Zen")
-    lines.append("   paths.")
-    lines.append("2. Run the three harnesses against the seeded target:")
+    lines.append("The credential is an OpenCode session token against")
+    lines.append("`https://opencode.ai/inference/go/openai/v1`, sent with both")
+    lines.append("`x-opencode-org-id` and `x-opencode-session`. The older")
+    lines.append("`https://opencode.ai/zen/go` inference path rejects this credential")
+    lines.append("with `401 Invalid API key`; only the model listing still answers there.")
     lines.append("")
-    lines.append("   ```bash")
-    lines.append("   evals/run-eval.sh bridge   idor-app")
-    lines.append("   evals/run-eval.sh opencode idor-app")
-    lines.append("   evals/run-eval.sh claude   idor-app")
-    lines.append("   ```")
+    lines.append("```bash")
+    lines.append("evals/run-eval.sh bridge   idor-app")
+    lines.append("evals/run-eval.sh opencode idor-app")
+    lines.append("evals/run-eval.sh claude   idor-app")
+    lines.append("python3 scripts/render-eval.py")
+    lines.append("```")
     lines.append("")
-    lines.append("3. Regenerate this file: `python3 scripts/render-eval.py`.")
+    lines.append("`evals/idor-app` is a seeded local target with one deliberate IDOR on")
+    lines.append("`/v2/orders/{id}` and a control next to it. A finding against the")
+    lines.append("control is scored as a false positive.")
     lines.append("")
-    lines.append("The owner-supplied targets the plan also calls for — one or two past")
-    lines.append("reported findings, sanitised, and a web7 Foundry fork — are not present")
-    lines.append("on this machine and are not invented here. Add them to")
-    lines.append("`evals/targets.json` when they are available.")
+    lines.append("Targets the plan also asks for — one or two past reported findings,")
+    lines.append("sanitised, and a web7 Foundry fork — are not present on this machine")
+    lines.append("and are not invented here. Add them to `evals/targets.json` when they")
+    lines.append("are available.")
 
     out_path.write_text("\n".join(lines) + "\n")
     print(f"wrote {out_path} from {len(runs)} run(s): {len(real)} scored, {len(smoke)} smoke")
+
+def yesno(value):
+    if value is None:
+        return "unknown"
+    return "yes" if value else "no"
 
 
 def fmt(value):
