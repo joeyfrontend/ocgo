@@ -24,6 +24,7 @@ import (
 	"ocgo/internal/responses"
 	"ocgo/internal/session"
 	"ocgo/internal/trace"
+	"ocgo/internal/usage"
 )
 
 const (
@@ -34,6 +35,7 @@ const (
 	codexProfileName                   = "ocgo-launch"
 	userAgentPrefix                    = "ocgo-hunt7"
 	maxAnthropicToolResultContentChars = 120000
+	defaultCodexModel                  = "glm-5.3-flash"
 )
 
 var version = "dev"
@@ -234,7 +236,7 @@ var reasoningContentCache = struct {
 
 func main() {
 	root := &cobra.Command{Use: appName, Short: "Run Claude Code with OpenCode Go", Version: version}
-	root.AddCommand(setupCmd(), listCmd(), mappingCmd(), launchCmd(), serveCmd(), stopCmd(), statusCmd())
+	root.AddCommand(setupCmd(), listCmd(), mappingCmd(), launchCmd(), serveCmd(), stopCmd(), statusCmd(), usageCmd())
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -777,7 +779,10 @@ func launchCmd() *cobra.Command {
 			return err
 		}
 		base := fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)
-		if err := ensureCodexConfig(base); err != nil {
+		if strings.TrimSpace(model) == "" {
+			model = defaultCodexModel
+		}
+		if err := ensureCodexConfig(base, model); err != nil {
 			return fmt.Errorf("failed to configure codex: %w", err)
 		}
 		if codexConfigOnly {
@@ -794,10 +799,7 @@ func launchCmd() *cobra.Command {
 		if serverCmd != nil {
 			defer stopManagedServer(serverCmd)
 		}
-		codexArgs := []string{"--profile", codexProfileName}
-		if model != "" {
-			codexArgs = append(codexArgs, "-m", model)
-		}
+		codexArgs := []string{"--profile", codexProfileName, "-m", model}
 		codexArgs = append(codexArgs, args...)
 		bin, err := exec.LookPath("codex")
 		if err != nil {
@@ -884,6 +886,43 @@ func statusCmd() *cobra.Command {
 	}}
 }
 
+// usageCmd reports spend against the per-model allowances. OpenCode Go meters
+// each model separately, with a 5-hour window at 20% of the monthly limit, a
+// weekly window at 50%, and the monthly limit itself.
+func usageCmd() *cobra.Command {
+	return &cobra.Command{Use: "usage", Short: "Show OpenCode Go spend per model and window", RunE: func(cmd *cobra.Command, args []string) error {
+		ledger, err := usage.Open(usageFile())
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		totals := ledger.Totals(now)
+		if len(totals) == 0 {
+			fmt.Printf("No usage recorded in %s yet.\n", usageFile())
+			return nil
+		}
+		models := make([]string, 0, len(totals))
+		for model := range totals {
+			models = append(models, model)
+		}
+		sort.Strings(models)
+		fmt.Printf("%-24s %12s %12s %12s   %s\n", "model", "5h", "week", "month", "monthly allowance")
+		for _, model := range models {
+			spend := totals[model]
+			allowance := "unmetered"
+			if meta, ok := usage.Lookup(model); ok && meta.Monthly > 0 {
+				allowance = fmt.Sprintf("$%.2f used of $%.2f (%.1f%%)",
+					spend[usage.WindowMonth], meta.Monthly, spend[usage.WindowMonth]/meta.Monthly*100)
+			}
+			fmt.Printf("%-24s %12s %12s %12s   %s\n", model,
+				money(spend[usage.Window5h]), money(spend[usage.WindowWeek]), money(spend[usage.WindowMonth]), allowance)
+		}
+		return nil
+	}}
+}
+
+func money(v float64) string { return fmt.Sprintf("$%.4f", v) }
+
 // proxy holds the per-server state shared by every request: configuration, the
 // optional trace writer, the conversation-to-session resolver and the set of
 // warnings already reported.
@@ -891,6 +930,7 @@ type proxy struct {
 	cfg     Config
 	trace   *trace.Writer
 	session *session.Resolver
+	usage   *usage.Ledger
 
 	mu     sync.Mutex
 	warned map[string]bool
@@ -901,7 +941,44 @@ func newProxy(cfg Config) (*proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &proxy{cfg: cfg, trace: tw, session: session.NewResolver(), warned: map[string]bool{}}, nil
+	ledger, err := usage.Open(usageFile())
+	if err != nil {
+		return nil, err
+	}
+	return &proxy{
+		cfg:     cfg,
+		trace:   tw,
+		session: session.NewResolver(),
+		usage:   ledger,
+		warned:  map[string]bool{},
+	}, nil
+}
+
+// recordUsage adds one request to the spend ledger and traces the figure.
+// Only the chat-completions branch reports usage; the Anthropic-endpoint
+// branch does not, so spend for those models is under-counted.
+func (p *proxy) recordUsage(conv, model string, u responses.Usage) {
+	if !u.Present {
+		return
+	}
+	m, ok := usage.Lookup(model)
+	if !ok {
+		return
+	}
+	cost := usage.Cost(m, u.Input, u.Cached, u.Output, time.Now())
+	if err := p.usage.Record(usage.Entry{
+		Model:  model,
+		Input:  u.Input,
+		Cached: u.Cached,
+		Output: u.Output,
+		Cost:   cost,
+	}); err != nil {
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: "usage ledger: " + err.Error()})
+		return
+	}
+	p.trace.Log(conv, trace.KindNote, trace.Record{
+		Text: fmt.Sprintf("usage %s: %d in (%d cached) / %d out = $%.6f", model, u.Input, u.Cached, u.Output, cost),
+	})
 }
 
 // warnOnce records a translation warning at most once per conversation, so a
@@ -1112,8 +1189,12 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	p.trace.LogHeaders(conv, trace.KindInbound, r.Method, r.URL.Path, r.Header, raw)
 	p.trace.Log(conv, trace.KindNote, trace.Record{Text: fmt.Sprintf("session id %q (native header %q)", sessionID, nativeHeader)})
 
+	requested := rr.Model
+	if strings.TrimSpace(requested) == "" {
+		requested = defaultCodexModel
+	}
 	chat := rr.ToChat()
-	chat.Model = resolveToolModel("codex", rr.Model)
+	chat.Model = resolveToolModel("codex", requested)
 	chat.ReasoningEffort = downstreamReasoningEffort(rr.Reasoning, rr.Thinking, rr.OutputConfig, rr.ReasoningEffort, rr.Effort, rr.Level, rr.Depth)
 	for _, warning := range chat.Warnings {
 		p.warnOnce(conv, warning)
@@ -1133,6 +1214,22 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 		Model:            or.Model,
 		ReasoningSummary: reasoningSummaryEnabled(),
 		Warn:             func(msg string) { p.warnOnce(conv, msg) },
+	}
+	verdict := p.usage.Check(or.Model, time.Now())
+	if verdict.Warning {
+		p.warnOnce(conv, "budget: "+verdict.Message)
+	}
+	if !verdict.Allowed {
+		p.trace.Log(conv, trace.KindError, trace.Record{Text: "budget: " + verdict.Message})
+		if rr.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_ = responses.NewStreamTranslator(translator).Fail("budget_exhausted", verdict.Message)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "budget_exhausted", "message": verdict.Message}})
+		return
 	}
 
 	if modelUsesAnthropicEndpoint(or.Model) {
@@ -1198,16 +1295,21 @@ func (p *proxy) responses(w http.ResponseWriter, r *http.Request) {
 	}
 	if rr.Stream {
 		w.Header().Set("Content-Type", "text/event-stream")
-		if _, err := responses.TranslateStream(out, stream, translator); err != nil {
+		tr, err := responses.TranslateStream(out, stream, translator)
+		if err != nil {
 			p.trace.Log(conv, trace.KindError, trace.Record{Text: "stream translation: " + err.Error()})
 		}
+		p.recordUsage(conv, or.Model, tr.Usage())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if _, err := responses.TranslateResponse(out, stream, translator); err != nil {
+	tr, err := responses.TranslateResponse(out, stream, translator)
+	if err != nil {
 		p.trace.Log(conv, trace.KindError, trace.Record{Text: "response translation: " + err.Error()})
 		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
 	}
+	p.recordUsage(conv, or.Model, tr.Usage())
 }
 
 // reasoningSummaryEnabled reports whether reasoning items should be emitted.
@@ -3034,6 +3136,7 @@ func startServerProcess(detached bool) (*exec.Cmd, error) {
 func configDir() string  { home, _ := os.UserHomeDir(); return filepath.Join(home, ".config", "ocgo") }
 func configFile() string { return filepath.Join(configDir(), "config.json") }
 func pidFile() string    { return filepath.Join(configDir(), "ocgo.pid") }
+func usageFile() string  { return filepath.Join(configDir(), "usage.json") }
 
 var modelMappingFile = func() string { return filepath.Join(configDir(), "model-mapping.json") }
 
@@ -3052,7 +3155,7 @@ func codexModelCatalogFile() string {
 	return filepath.Join(home, ".codex", "ocgo-models.json")
 }
 
-func ensureCodexConfig(base string) error {
+func ensureCodexConfig(base, model string) error {
 	path := codexConfigFile()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -3060,13 +3163,14 @@ func ensureCodexConfig(base string) error {
 	if err := writeCodexModelCatalog(codexModelCatalogFile()); err != nil {
 		return err
 	}
-	return writeCodexProfile(path, strings.TrimRight(base, "/")+"/v1/")
+	return writeCodexProfile(path, strings.TrimRight(base, "/")+"/v1/", model)
 }
 
-func writeCodexProfile(path, baseURL string) error {
+func writeCodexProfile(path, baseURL, model string) error {
 	profilePath := filepath.Join(filepath.Dir(path), codexProfileName+".config.toml")
 	catalogPath := codexModelCatalogFile()
 	profileText := strings.Join([]string{
+		fmt.Sprintf("model = %q", model),
 		fmt.Sprintf("openai_base_url = %q", baseURL),
 		`forced_login_method = "api"`,
 		fmt.Sprintf("model_provider = %q", codexProfileName),

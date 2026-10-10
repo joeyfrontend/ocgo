@@ -40,7 +40,7 @@ func TestMain(m *testing.M) {
 func TestWriteCodexProfile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
-	if err := writeCodexProfile(path, "http://127.0.0.1:3456/v1/"); err != nil {
+	if err := writeCodexProfile(path, "http://127.0.0.1:3456/v1/", "glm-5.3-flash"); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(filepath.Join(dir, "ocgo-launch.config.toml"))
@@ -49,6 +49,7 @@ func TestWriteCodexProfile(t *testing.T) {
 	}
 	content := string(b)
 	for _, want := range []string{
+		`model = "glm-5.3-flash"`,
 		`openai_base_url = "http://127.0.0.1:3456/v1/"`,
 		`forced_login_method = "api"`,
 		`model_provider = "ocgo-launch"`,
@@ -83,7 +84,7 @@ func TestWriteCodexProfileMigratesLegacySections(t *testing.T) {
 	if err := os.WriteFile(path, []byte(existing), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCodexProfile(path, "http://new/v1/"); err != nil {
+	if err := writeCodexProfile(path, "http://new/v1/", "glm-5.3-flash"); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
